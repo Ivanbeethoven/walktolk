@@ -2,7 +2,7 @@
 
 把 OpenWalkieTalkie Rev A 接到 DeepSeek Harness（DSH）。在 deck 上可以翻看当前和历史会话，读最近回复，回答提问，批准或拒绝工具调用，也可以按住 PTT 向当前运行的助手说话。
 
-**[读博客《把 DeepSeek Harness 放进对讲机的屏幕里》](docs/deck-and-dsh.md)** · [查看实机照片](docs/images/deck-session.jpg)
+**[读博客《按住对讲机说句话，DeepSeek Harness 回了一个 7》](docs/deck-and-dsh.md)** · [查看实机照片](docs/images/deck-session.jpg)
 
 ## 从哪里读代码
 
