@@ -1,0 +1,128 @@
+[package]
+name = "deckd"
+description = "OpenWalkieTalkie host service: owns the deck's HID link, the agent roster and cards"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "deckd"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+deck-proto = { workspace = true }
+deck-model = { workspace = true }
+deck-client = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+hidapi = { workspace = true }
+nusb = "=0.1.13"
+crossbeam-channel = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+clap = { workspace = true }
+directories = { workspace = true }
+blake3 = { workspace = true }
+thiserror = { workspace = true }
+libc = { workspace = true }
+axum = { workspace = true }
+futures-util = { workspace = true }
+notify = { workspace = true }
+arc-swap = { workspace = true }
+getrandom = { workspace = true }
+# The Codex app-server daemon speaks JSON-RPC over a WebSocket on a Unix
+# socket (`deckd::codexd`); the same crate serves the test fakes.
+tokio-tungstenite = { workspace = true }
+
+sha2 = "=0.10.9"
+semver = "=1.0.28"
+base64 = "=0.22.1"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+color_quant = "=1.1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { workspace = true }
+# Week 4: the voice pipeline (HOST-CONTRACT-W4 §3 B11). Gated exactly like
+# `security-framework` above — CoreAudio, AVFoundation and Speech.framework
+# exist on no other platform, and the workspace still has to `cargo check` on
+# one.
+objc2 = { workspace = true }
+block2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-core-audio = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-speech = { workspace = true }
+objc2-avf-audio = { workspace = true }
+objc2-app-kit = { workspace = true }
+# The local recogniser's engine (`audio::whisper`): whisper.cpp with Metal.
+whisper-rs = { workspace = true }
+# The local synthesiser's engine (`audio::kokoro`): Kokoro via sherpa-onnx.
+sherpa-onnx = { workspace = true }
+# The deck's BLE audio service (`deckd::ble`): CoreBluetooth on a private
+# serial queue. CoreBluetooth itself has no binding crate in this tree; the
+# few classes the link needs are declared in `ble/cb.rs`.
+dispatch2 = { workspace = true }
+# The Info.plist a launchd-started bare `deckd` needs for CoreBluetooth's
+# usage string (src/main.rs).
+embed_plist = { workspace = true }
+
+# The voice engine's own pieces, shared by macOS and Linux (`audio::lanes`, `audio::ble`).
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+cpal = { workspace = true }
+rubato = { workspace = true }
+rtrb = { workspace = true }
+
+# The deck's BLE audio service on Linux: BlueZ over D-Bus (`ble::bluez`).
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17", features = ["bluetoothd"] }
+futures = "0.3"
+uuid = "1"
+# The local recogniser on Linux: whisper.cpp on the CPU (macOS builds it with Metal).
+whisper-rs = "=0.16.0"
+
+# Windows (the minimal port): process queries in place of `kill(pid, 0)`
+# (`liveness::alive`), and chrono's local zone in place of `localtime_r`
+# (its `clock` dependencies are already in this lock). The named pipe's own
+# calls live in deck-client's `windows` module.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
+# The computer's own microphone for `voice.listen{input:"mac"}`
+# (`audio::system_mic`): cpal over WASAPI.
+cpal = { workspace = true }
+# The local synthesiser on Windows (`audio::kokoro`), as on macOS: Kokoro via
+# sherpa-onnx's prebuilt static library.
+sherpa-onnx = { workspace = true }
+# The deck's BLE audio service on Windows: WinRT's GATT client (`ble::winrt`).
+# The version gpui already brings into this lock.
+windows = { version = "=0.61.3", features = [
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Devices_Enumeration",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+] }
+chrono = { version = "=0.4.45", default-features = false, features = ["std", "clock"] }
+# Voice: the engine Linux runs (`audio::linux`, `engine`, `lanes`, `tts`)
+# needs these two; the deck's link carries the audio over USB.
+rubato = { workspace = true }
+rtrb = { workspace = true }
+# The local recogniser on Windows: whisper.cpp on the CPU, as on Linux.
+whisper-rs = "=0.16.0"
+
+[dev-dependencies]
+deck-wrap = { path = "../deck-wrap" }
+
+# B10's run loop can only be tested on the process's **main** thread: a
+# `dispatch_async` to the main queue runs nowhere else (V13), and libtest
+# runs every `#[test]` on a worker. `harness = false` gives this one file
+# the real `fn main()`, which is the only place the claim is true.
+[[test]]
+name = "voice_mainloop"
+harness = false

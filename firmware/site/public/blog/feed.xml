@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>OpenWalkieTalkie Blog</title>
+  <subtitle>Build logs and write-ups from the open-source handheld radio for your AI agents.</subtitle>
+  <id>https://openwalkietalkie.org/blog/</id>
+  <link href="https://openwalkietalkie.org/blog/" />
+  <link rel="self" type="application/atom+xml" href="https://openwalkietalkie.org/blog/feed.xml" />
+  <updated>2026-11-16T05:04:33Z</updated>
+  <author><name>Tony Huang</name></author>
+  <entry>
+    <title>OpenWalkieTalkie v0.14.0: One deck for Mac, Windows and Omarchy</title>
+    <id>https://openwalkietalkie.org/blog/one-deck-mac-windows-omarchy/</id>
+    <link href="https://openwalkietalkie.org/blog/one-deck-mac-windows-omarchy/" />
+    <published>2026-11-16T05:04:33Z</published>
+    <updated>2026-11-16T05:04:33Z</updated>
+    <summary>The Mac app becomes the deck&#39;s companion, the service also runs on Windows and Omarchy, Grok Bot joins Claude Code and Codex on the deck, and the deck confirms its own firmware installs.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.13.0: Four languages, one setting</title>
+    <id>https://openwalkietalkie.org/blog/four-languages-one-setting/</id>
+    <link href="https://openwalkietalkie.org/blog/four-languages-one-setting/" />
+    <published>2026-11-08T02:41:16Z</published>
+    <updated>2026-11-08T02:41:16Z</updated>
+    <summary>English, Simplified Chinese, Traditional Chinese and Japanese on the Mac app and deck, with saved language choices that synchronize in both directions. Plus hundredths and audible timer finishes.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.12.0: Conol hears you, plus Pomodoro</title>
+    <id>https://openwalkietalkie.org/blog/conol-speech-and-pomodoro/</id>
+    <link href="https://openwalkietalkie.org/blog/conol-speech-and-pomodoro/" />
+    <published>2026-11-05T03:40:00Z</published>
+    <updated>2026-11-05T03:40:00Z</updated>
+    <summary>Conol transcribes what you say to its chats with its own speech model, the deck shows a live recording timeline, and a new Timer face adds a stopwatch, countdown and Pomodoro.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.11.1: Keep your words across pauses</title>
+    <id>https://openwalkietalkie.org/blog/ptt-pauses-keep-your-words/</id>
+    <link href="https://openwalkietalkie.org/blog/ptt-pauses-keep-your-words/" />
+    <published>2026-10-28T06:26:49Z</published>
+    <updated>2026-10-28T06:26:49Z</updated>
+    <summary>Pause while holding PTT and keep speaking. Earlier phrases now stay in the preview and final transcript with Apple on-device recognition.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.11.0: Conol and native companions</title>
+    <id>https://openwalkietalkie.org/blog/conol-and-native-companions/</id>
+    <link href="https://openwalkietalkie.org/blog/conol-and-native-companions/" />
+    <published>2026-10-28T03:07:14Z</published>
+    <updated>2026-10-28T03:07:14Z</updated>
+    <summary>Conol conversations, new-chat dictation and multi-step questions on the deck, with an open companion API for other apps.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.10.0: Computer resources on the deck</title>
+    <id>https://openwalkietalkie.org/blog/computer-resources-on-the-deck/</id>
+    <link href="https://openwalkietalkie.org/blog/computer-resources-on-the-deck/" />
+    <published>2026-10-26T06:52:06Z</published>
+    <updated>2026-10-26T06:52:06Z</updated>
+    <summary>A live CPU, memory, GPU and storage page for your Mac, more efficient Flappy Bird rendering, and longer original Arcade music.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.9.0: Clearer USB speech and reset reminders</title>
+    <id>https://openwalkietalkie.org/blog/usb-audio-and-reset-reminders/</id>
+    <link href="https://openwalkietalkie.org/blog/usb-audio-and-reset-reminders/" />
+    <published>2026-10-22T08:23:08Z</published>
+    <updated>2026-10-22T08:23:08Z</updated>
+    <summary>48 kHz USB speaker playback, improved 16 kHz audio, and reminders before unused manual usage resets expire on your Mac and deck.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.8.0: Screen lock and consistent wheel navigation</title>
+    <id>https://openwalkietalkie.org/blog/screen-lock-and-wheel-navigation/</id>
+    <link href="https://openwalkietalkie.org/blog/screen-lock-and-wheel-navigation/" />
+    <published>2026-10-21T09:02:39Z</published>
+    <updated>2026-10-21T09:02:39Z</updated>
+    <summary>An automatic screen lock protects PTT in your bag, with four counterclockwise ticks to unlock and a consistent direction for page and item selection.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.7.0: Clearer speech, less hiss</title>
+    <id>https://openwalkietalkie.org/blog/speaker-eq-and-less-hiss/</id>
+    <link href="https://openwalkietalkie.org/blog/speaker-eq-and-less-hiss/" />
+    <published>2026-10-20T15:08:13Z</published>
+    <updated>2026-10-20T15:08:13Z</updated>
+    <summary>Speaker EQ for speech and chimes, plus RAM execution on Rev A to reduce flash-coupled hiss while keeping settings and Bluetooth pairing intact.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.6.0: Arcade on the deck</title>
+    <id>https://openwalkietalkie.org/blog/arcade-on-the-deck/</id>
+    <link href="https://openwalkietalkie.org/blog/arcade-on-the-deck/" />
+    <published>2026-10-19T08:27:59Z</published>
+    <updated>2026-10-19T08:27:59Z</updated>
+    <summary>Three full-screen games, physical controls, and original 8-bit music and effects with an Off switch.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.5.0: Desktop connected, factory ready</title>
+    <id>https://openwalkietalkie.org/blog/desktop-connection-and-factory-images/</id>
+    <link href="https://openwalkietalkie.org/blog/desktop-connection-and-factory-images/" />
+    <published>2026-10-19T05:00:00Z</published>
+    <updated>2026-10-19T05:00:00Z</updated>
+    <summary>Codex Desktop connection fixes, reliable short replies, alternate flash support, and factory programming images.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.4.0: recovery on screen, room to grow</title>
+    <id>https://openwalkietalkie.org/blog/recovery-and-more-room/</id>
+    <link href="https://openwalkietalkie.org/blog/recovery-and-more-room/" />
+    <published>2026-10-18T05:00:00Z</published>
+    <updated>2026-10-18T05:00:00Z</updated>
+    <summary>A guided bootloader upgrade, recovery progress on the deck, faster USB transfers, and Chinese text.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.3.0: images and pending questions</title>
+    <id>https://openwalkietalkie.org/blog/images-and-questions/</id>
+    <link href="https://openwalkietalkie.org/blog/images-and-questions/" />
+    <published>2026-10-15T14:20:00Z</published>
+    <updated>2026-10-15T14:20:00Z</updated>
+    <summary>Chat images on your Mac and deck, stable image previews, and Codex questions you can answer from the handheld.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.2.1: our radio, everywhere</title>
+    <id>https://openwalkietalkie.org/blog/radio-branding/</id>
+    <link href="https://openwalkietalkie.org/blog/radio-branding/" />
+    <published>2026-10-15T09:00:00Z</published>
+    <updated>2026-10-15T09:00:00Z</updated>
+    <summary>The website radio comes to the app icon, menu bar, device splash and About screen. A COHDL project.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.2.0: workflows at a glance</title>
+    <id>https://openwalkietalkie.org/blog/workflows-and-usage/</id>
+    <link href="https://openwalkietalkie.org/blog/workflows-and-usage/" />
+    <published>2026-10-13T14:00:00Z</published>
+    <updated>2026-10-13T14:00:00Z</updated>
+    <summary>Live workflow progress on your Mac and handheld, Claude Fable usage limits, and a fix for the blinking workflow page.</summary>
+  </entry>
+  <entry>
+    <title>OpenWalkieTalkie v0.1.0: a handheld for your agents</title>
+    <id>https://openwalkietalkie.org/blog/introducing-openwalkietalkie/</id>
+    <link href="https://openwalkietalkie.org/blog/introducing-openwalkietalkie/" />
+    <published>2026-10-13T00:00:00Z</published>
+    <updated>2026-10-13T00:00:00Z</updated>
+    <summary>The first official Mac app and firmware release: push-to-talk, conversations on the deck, and app and device updates.</summary>
+  </entry>
+</feed>

@@ -1,0 +1,995 @@
+//! Terminal-independent Claude Channels bridge. Only the core can send orders;
+//! MCP children receive them over an authenticated, local, receive-only door.
+//! A nonce acknowledged through MCP proves Claude accepted channel notifications.
+//! An uncertain write is never retried through the inbox (that would duplicate it).
+//! The bridge is the owner's opt-in (`[sources] claude_channels`): the door is
+//! open only while it is switched on.
+//!
+//! The door is a Unix socket in the data directory, or on Windows a named
+//! pipe named after it ([`socket`], [`link`], [`DoorListener`]); both ends
+//! check the other is the same user running the same `deckd` executable.
+mod mcp;
+
+use crate::desktop::{DesktopError, FromDesktop};
+use crate::inbox::Inbox;
+use deck_model::Agent;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{mpsc, watch};
+
+const BUDGET: Duration = Duration::from_secs(5);
+const MAX_LINE: usize = 128 * 1024;
+/// How often the door reads the owner's switch: a change to it, or to the
+/// plugin that decides it while the config leaves it unset, takes effect
+/// within this. A helper retries every 2 s, so it never waits much longer.
+const SWITCH_POLL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct Identity {
+    pid: u32,
+    session: String,
+}
+
+/// Read current identity, not the MCP child's startup environment: /clear and
+/// interactive resume can change the conversation without restarting the child.
+fn identity(dir: &Path, pid: u32) -> Option<Identity> {
+    let bytes = std::fs::read(dir.join("sessions").join(format!("{pid}.json"))).ok()?;
+    if bytes.len() > MAX_LINE {
+        return None;
+    }
+    let row: Value = serde_json::from_slice(&bytes).ok()?;
+    if row["pid"].as_u64()? != u64::from(pid) {
+        return None;
+    }
+    let session = row["sessionId"].as_str()?;
+    if session.is_empty() || session.len() > 256 {
+        return None;
+    }
+    Some(Identity {
+        pid,
+        session: session.into(),
+    })
+}
+
+#[derive(Debug)]
+struct Job {
+    text: String,
+    deadline: Instant,
+    reply: crossbeam_channel::Sender<Delivery>,
+    started: bool,
+}
+
+// A queued job dropped on disconnect has definitely not been written. Once
+// writing starts, a dropped job is uncertain and must not be replayed.
+impl Drop for Job {
+    fn drop(&mut self) {
+        let _ = self.reply.try_send(if self.started {
+            Delivery::Uncertain
+        } else {
+            Delivery::Unavailable
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    Sent,
+    Unavailable,
+    Uncertain,
+    SessionChanged,
+}
+
+#[derive(Debug)]
+struct Entry {
+    connection: u64,
+    ready: bool,
+    sender: mpsc::Sender<Job>,
+}
+
+#[derive(Debug, Default)]
+pub struct Hub {
+    entries: Mutex<BTreeMap<Identity, Entry>>,
+    /// Same-user `deckd` helpers this daemon refused (a different or missing
+    /// executable), last refused at. A helper retries every 2 s, then every
+    /// 30 s once it has backed off, so the window covers a slow retry.
+    stale: Mutex<BTreeMap<u32, Instant>>,
+}
+
+const STALE_WINDOW: Duration = Duration::from_secs(45);
+
+impl Hub {
+    #[cfg(test)]
+    pub(crate) fn test_channel(
+        &self,
+        pid: u32,
+        session: &str,
+    ) -> crossbeam_channel::Receiver<String> {
+        let (sender, mut jobs) = mpsc::channel::<Job>(8);
+        self.entries.lock().unwrap().insert(
+            Identity {
+                pid,
+                session: session.into(),
+            },
+            Entry {
+                connection: 1,
+                ready: true,
+                sender,
+            },
+        );
+        let (tx, rx) = crossbeam_channel::unbounded();
+        std::thread::spawn(move || {
+            while let Some(job) = jobs.blocking_recv() {
+                let _ = tx.send(job.text.clone());
+                let _ = job.reply.send(Delivery::Sent);
+            }
+        });
+        rx
+    }
+
+    fn sender(&self, agent: &Agent) -> Option<mpsc::Sender<Job>> {
+        // Virtual agents cannot claim another conversation's channel.
+        if agent.owner.principal != deck_model::Principal::Adapter(deck_model::AdapterKind::Claude)
+        {
+            return None;
+        }
+        let id = Identity {
+            pid: agent.session.pid?,
+            session: agent
+                .session
+                .key
+                .as_deref()?
+                .strip_prefix("claude:")?
+                .into(),
+        };
+        self.entries
+            .lock()
+            .ok()?
+            .get(&id)
+            .filter(|e| e.ready && !e.sender.is_closed())
+            .map(|e| e.sender.clone())
+    }
+
+    fn note_stale(&self, pid: u32) {
+        self.stale.lock().expect("channel hub").insert(pid, Instant::now());
+    }
+
+    fn clear_stale(&self, pid: u32) {
+        self.stale.lock().expect("channel hub").remove(&pid);
+    }
+
+    /// The door closed: no helper is linked, and none is being refused.
+    fn close(&self) {
+        self.entries.lock().expect("channel hub").clear();
+        self.stale.lock().expect("channel hub").clear();
+    }
+
+    /// Channel helpers refused because they run a different (or vanished)
+    /// `deckd` executable than this daemon, e.g. left over from before an
+    /// update, or this daemon being the odd one out. Entries age out, and a
+    /// helper whose process has exited stops counting at once, so the number
+    /// follows restarted sessions instead of freezing.
+    pub fn stale_count(&self) -> usize {
+        let mut stale = self.stale.lock().expect("channel hub");
+        stale.retain(|pid, seen| seen.elapsed() < STALE_WINDOW && process_alive(*pid));
+        stale.len()
+    }
+
+    pub fn ready(&self, agent: &Agent) -> bool { self.sender(agent).is_some() }
+
+    /// Claude sessions whose helper is attached and has proved that Claude
+    /// takes its notifications: what `sources.list` counts as the Claude
+    /// Channels row's sessions (`care::sources`).
+    pub fn ready_count(&self) -> usize {
+        let entries = self.entries.lock().expect("channel hub");
+        entries.values().filter(|e| e.ready && !e.sender.is_closed()).count()
+    }
+
+    pub fn status(&self) -> Value {
+        let entries = self.entries.lock().expect("channel hub");
+        json!(entries
+            .iter()
+            .filter(|(_, e)| !e.sender.is_closed())
+            .map(|(id, e)| {
+                json!({"session": id.session, "state": if e.ready { "ready" } else { "checking" }})
+            })
+            .collect::<Vec<_>>())
+    }
+
+    /// Returns false before taking the order when there is no verified channel.
+    /// Once taken, this owns both the outcome and any safe inbox fallback;
+    /// the outcome names `order`, the id `order.dispatched` gave the words.
+    pub fn post(
+        &self,
+        agent: &Agent,
+        text: &str,
+        order: Option<String>,
+        inbox: Option<Inbox>,
+        dialog_open: bool,
+        out: crossbeam_channel::Sender<FromDesktop>,
+    ) -> bool {
+        let Some(sender) = self.sender(agent) else {
+            return false;
+        };
+        let id = agent.id.clone();
+        let text = text.to_owned();
+        let failed_id = id.clone();
+        let failed_text = text.clone();
+        let failed_order = order.clone();
+        let failed_out = out.clone();
+        if std::thread::Builder::new()
+            .name("deckd-channel-order".into())
+            .spawn(move || {
+                let result = if dialog_open {
+                    Err(DesktopError::DialogOpen)
+                } else {
+                    let (reply, rx) = crossbeam_channel::bounded(1);
+                    let job = Job {
+                        text: text.clone(),
+                        deadline: Instant::now() + BUDGET,
+                        reply,
+                        started: false,
+                    };
+                    let delivery = if sender.try_send(job).is_err() {
+                        Delivery::Unavailable
+                    } else {
+                        rx.recv_timeout(BUDGET + Duration::from_secs(1))
+                            .unwrap_or(Delivery::Uncertain)
+                    };
+                    finish_delivery(delivery, inbox.as_ref(), &text)
+                };
+                let _ = out.send(FromDesktop::Order {
+                    agent: id,
+                    text,
+                    order,
+                    result,
+                });
+            })
+            .is_err()
+        {
+            let _ = failed_out.send(FromDesktop::Order {
+                agent: failed_id,
+                text: failed_text,
+                order: failed_order,
+                result: Err(DesktopError::Inbox("channel_worker_failed")),
+            });
+        }
+        true
+    }
+}
+
+fn finish_delivery(
+    delivery: Delivery,
+    inbox: Option<&Inbox>,
+    text: &str,
+) -> Result<(), DesktopError> {
+    match delivery {
+        Delivery::Sent => Ok(()),
+        Delivery::Unavailable => inbox
+            .ok_or(DesktopError::Inbox("channel_unavailable"))
+            .and_then(|inbox| crate::inbox::post(inbox, text)),
+        Delivery::SessionChanged => Err(DesktopError::Inbox("channel_session_changed")),
+        Delivery::Uncertain => Err(DesktopError::Inbox("channel_delivery_uncertain")),
+    }
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    // SAFETY: signal 0 only checks that the process exists.
+    unsafe { libc::kill(pid, 0) == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+}
+
+#[cfg(not(unix))]
+fn process_alive(pid: u32) -> bool {
+    crate::liveness::alive(pid)
+}
+
+/// The door's address: a socket in the data directory, or on Windows the
+/// data directory's pipe name with `-channel` after it (the API's door is
+/// that name alone).
+fn socket(data: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(format!("{}-channel", deck_client::windows::pipe_name_for(data).display()))
+    }
+    #[cfg(not(windows))]
+    {
+        data.join("claude-channel.sock")
+    }
+}
+
+/// Why [`peer`] said no.
+#[derive(Debug)]
+enum PeerError {
+    /// Not a same-user process, no pid, or unreadable credentials.
+    Rejected(io::Error),
+    /// A same-user process that is not running this executable: `exe` is what
+    /// `proc_pidpath` resolved, or `None` when it could not (a deleted or
+    /// replaced binary).
+    OtherExecutable { pid: u32, exe: Option<PathBuf> },
+}
+
+impl PeerError {
+    /// Is the refused peer plausibly another copy of `deckd` (as opposed to
+    /// some unrelated same-user program)? An unresolvable path counts: that
+    /// is what a helper whose binary was deleted by an update looks like.
+    fn other_deckd(&self, own: &Path) -> Option<u32> {
+        match self {
+            PeerError::OtherExecutable { pid, exe: None } => Some(*pid),
+            PeerError::OtherExecutable { pid, exe: Some(exe) }
+                if exe.file_name() == own.file_name() =>
+            {
+                Some(*pid)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn peer(stream: &UnixStream) -> Result<u32, PeerError> {
+    let (uid, pid) = crate::api::uds::peer_of(stream).map_err(PeerError::Rejected)?;
+    let pid = pid.ok_or_else(|| PeerError::Rejected(io::Error::other("missing peer pid")))?;
+    // No script or general API client can impersonate either end of this door.
+    // The same deckd executable implements both the daemon and MCP helper.
+    let own_executable = std::env::current_exe().map_err(PeerError::Rejected)?;
+    if uid != unsafe { libc::geteuid() } {
+        return Err(PeerError::Rejected(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "channel peer",
+        )));
+    }
+    let exe = crate::trust::exe_path(pid);
+    if exe.as_ref() != Some(&own_executable) {
+        return Err(PeerError::OtherExecutable { pid, exe });
+    }
+    Ok(pid)
+}
+
+/// [`peer`] on Windows, for the process at the other end of a pipe: the
+/// same user (the pipe's DACL already admits no other, and the token is
+/// checked as well) running this very `deckd.exe` (paths compare without
+/// case, as Windows' do).
+#[cfg(windows)]
+fn peer_pid(pid: u32) -> Result<u32, PeerError> {
+    let refused = |why: &str| PeerError::Rejected(io::Error::new(io::ErrorKind::PermissionDenied, why.to_string()));
+    let ours = deck_client::windows::current_user().map_err(PeerError::Rejected)?;
+    let theirs = deck_client::windows::process_user(pid).map_err(PeerError::Rejected)?;
+    if ours != theirs {
+        return Err(refused("channel peer"));
+    }
+    let own_executable = std::env::current_exe().map_err(PeerError::Rejected)?;
+    let exe = crate::trust::exe_path(pid);
+    let same = exe.as_ref().is_some_and(|exe| {
+        exe.to_string_lossy().eq_ignore_ascii_case(&own_executable.to_string_lossy())
+    });
+    if !same {
+        return Err(PeerError::OtherExecutable { pid, exe });
+    }
+    Ok(pid)
+}
+
+/// The helper's end of the door: its stream, the stream's two halves, how it
+/// connects, and the daemon it found there, checked as the daemon checks it.
+#[cfg(unix)]
+mod link {
+    use super::{peer, PeerError};
+    use std::path::Path;
+    pub type Stream = tokio::net::UnixStream;
+    pub type Read = tokio::net::unix::OwnedReadHalf;
+    pub type Write = tokio::net::unix::OwnedWriteHalf;
+    pub async fn connect(path: &Path) -> std::io::Result<Stream> {
+        Stream::connect(path).await
+    }
+    pub fn split(stream: Stream) -> (Read, Write) {
+        stream.into_split()
+    }
+    pub fn server_peer(stream: &Stream) -> Result<u32, PeerError> {
+        peer(stream)
+    }
+}
+
+/// The helper's end of the door on Windows: the pipe, opened only when the
+/// process serving it is this user's (`deck_client::windows::connect`).
+#[cfg(windows)]
+mod link {
+    use super::{peer_pid, PeerError};
+    use std::path::Path;
+    pub type Stream = tokio::net::windows::named_pipe::NamedPipeClient;
+    pub type Read = tokio::io::ReadHalf<Stream>;
+    pub type Write = tokio::io::WriteHalf<Stream>;
+    pub async fn connect(path: &Path) -> std::io::Result<Stream> {
+        deck_client::windows::connect(path).await
+    }
+    pub fn split(stream: Stream) -> (Read, Write) {
+        tokio::io::split(stream)
+    }
+    pub fn server_peer(stream: &Stream) -> Result<u32, PeerError> {
+        let pid = deck_client::windows::pipe_peer_pid(stream, false).map_err(PeerError::Rejected)?;
+        peer_pid(pid)
+    }
+}
+
+/// The daemon's end of the door while it is open: the socket (mode 0600),
+/// removed when it closes.
+#[cfg(unix)]
+struct DoorListener {
+    path: PathBuf,
+    listener: UnixListener,
+}
+
+#[cfg(unix)]
+impl DoorListener {
+    fn bind(path: &Path) -> io::Result<DoorListener> {
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path)?;
+        if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(path);
+            return Err(error);
+        }
+        Ok(DoorListener { path: path.to_path_buf(), listener })
+    }
+
+    /// The next helper, with its pid when it passed [`peer`].
+    async fn accept(&mut self) -> io::Result<(UnixStream, Result<u32, PeerError>)> {
+        let (stream, _) = self.listener.accept().await?;
+        let verdict = peer(&stream);
+        Ok((stream, verdict))
+    }
+
+    fn close(self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The daemon's end of the door on Windows: pipe instances owned by and
+/// open to this user only, the first one the first of its name, a new one
+/// made as each is taken (as the API's door does).
+#[cfg(windows)]
+struct DoorListener {
+    name: PathBuf,
+    next: tokio::net::windows::named_pipe::NamedPipeServer,
+    security: deck_client::windows::SecurityDescriptor,
+}
+
+#[cfg(windows)]
+impl DoorListener {
+    fn bind(path: &Path) -> io::Result<DoorListener> {
+        let user = deck_client::windows::current_user()?;
+        let security = deck_client::windows::SecurityDescriptor::only(&user)?;
+        let next = crate::api::uds::instance(path, &security, true)?;
+        Ok(DoorListener { name: path.to_path_buf(), next, security })
+    }
+
+    async fn accept(
+        &mut self,
+    ) -> io::Result<(tokio::net::windows::named_pipe::NamedPipeServer, Result<u32, PeerError>)> {
+        self.next.connect().await?;
+        let fresh = crate::api::uds::instance(&self.name, &self.security, false)?;
+        let server = std::mem::replace(&mut self.next, fresh);
+        let verdict = deck_client::windows::pipe_peer_pid(&server, true)
+            .map_err(PeerError::Rejected)
+            .and_then(peer_pid);
+        Ok((server, verdict))
+    }
+
+    fn close(self) {}
+}
+
+struct Reader<R> {
+    input: BufReader<R>,
+    bytes: Vec<u8>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> Reader<R> {
+    fn new(input: R) -> Self {
+        Self {
+            input: BufReader::new(input),
+            bytes: Vec::new(),
+        }
+    }
+
+    // The buffer survives cancellation by select!, including partial frames.
+    async fn next(&mut self) -> io::Result<Value> {
+        let remaining = MAX_LINE + 1 - self.bytes.len();
+        (&mut self.input)
+            .take(remaining as u64)
+            .read_until(b'\n', &mut self.bytes)
+            .await?;
+        if self.bytes.is_empty() {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        if self.bytes.len() > MAX_LINE || self.bytes.last() != Some(&b'\n') {
+            return Err(io::Error::other("channel frame too large or incomplete"));
+        }
+        let bytes = std::mem::take(&mut self.bytes);
+        serde_json::from_slice(&bytes).map_err(io::Error::other)
+    }
+}
+
+async fn write<W: AsyncWrite + Unpin>(output: &mut W, value: &Value) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    tokio::time::timeout(BUDGET, async {
+        output.write_all(&bytes).await?;
+        output.flush().await
+    })
+    .await?
+}
+
+/// Why an open door closed.
+#[derive(Debug)]
+enum Closed {
+    /// The daemon is stopping.
+    Stopped,
+    /// The owner switched Claude Channels off.
+    SwitchedOff,
+    /// The socket cannot be served: the inbox is the only route.
+    Unavailable,
+}
+
+/// The daemon already owns its single-instance lock before opening this socket.
+///
+/// The door is open only while `on` says the owner has Claude Channels
+/// switched on (`integrations::claude::channels_on`). Switched off, the
+/// socket is closed and removed and every helper's link with it, so the
+/// core's orders take the inbox; a helper still running in an open session
+/// then finds no door, which it already treats as a daemon that is not
+/// running: it retries quietly, and links again by itself once the switch
+/// is back on.
+pub async fn serve(
+    data: PathBuf,
+    hub: Arc<Hub>,
+    on: impl Fn() -> bool + Send + Sync + 'static,
+    stop: watch::Receiver<bool>,
+) {
+    serve_every(data, hub, on, SWITCH_POLL, stop).await;
+}
+
+/// [`serve`], reading the switch every `poll`.
+async fn serve_every(
+    data: PathBuf,
+    hub: Arc<Hub>,
+    on: impl Fn() -> bool + Send + Sync,
+    poll: Duration,
+    mut stop: watch::Receiver<bool>,
+) {
+    // A socket an earlier run left behind is no door either.
+    let _ = std::fs::remove_file(socket(&data));
+    let mut switch = tokio::time::interval(poll);
+    switch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Connection numbers run on across openings, so an entry can never be
+    // taken for one of an earlier opening's.
+    let mut next = 0u64;
+    loop {
+        tokio::select! {
+            _ = stop.changed() => return,
+            _ = switch.tick() => {}
+        }
+        if !on() {
+            continue;
+        }
+        match door(&data, &hub, &on, &mut switch, &mut next, &mut stop).await {
+            Closed::SwitchedOff => {
+                tracing::info!("Claude Channels switched off: the channel door is closed");
+            }
+            Closed::Stopped | Closed::Unavailable => return,
+        }
+    }
+}
+
+/// The open door: helpers are accepted until the daemon stops or the switch
+/// goes off. Whatever ends it, every link ends with it and the socket goes.
+async fn door(
+    data: &Path,
+    hub: &Arc<Hub>,
+    on: &(impl Fn() -> bool + Sync),
+    switch: &mut tokio::time::Interval,
+    next: &mut u64,
+    stop: &mut watch::Receiver<bool>,
+) -> Closed {
+    let path = socket(data);
+    let mut listener = match DoorListener::bind(&path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::warn!(%error, "Claude channel door unavailable; using inbox");
+            return Closed::Unavailable;
+        }
+    };
+    let mut connections = tokio::task::JoinSet::new();
+    let closed = loop {
+        tokio::select! {
+            _ = stop.changed() => break Closed::Stopped,
+            _ = switch.tick() => if !on() { break Closed::SwitchedOff },
+            Some(_) = connections.join_next(), if !connections.is_empty() => {},
+            accepted = listener.accept() => {
+                let Ok((stream, verdict)) = accepted else { break Closed::Unavailable };
+                if connections.len() >= 64 { continue; }
+                let pid = match verdict {
+                    Ok(pid) => { hub.clear_stale(pid); pid }
+                    Err(refusal) => {
+                        if let PeerError::Rejected(error) = &refusal {
+                            tracing::debug!(%error, "claude channel peer refused");
+                        }
+                        if let Some(pid) = std::env::current_exe().ok()
+                            .and_then(|own| refusal.other_deckd(&own)) { hub.note_stale(pid); }
+                        continue;
+                    }
+                };
+                let cli_pid = crate::hook::walk::resolve(pid, &crate::hook::walk::MacProcs,
+                    crate::hook::walk::MAX_HOPS).cli_pid;
+                let Some(cli_pid) = cli_pid else { continue };
+                *next += 1;
+                let (hub, number) = (hub.clone(), *next);
+                let (input, output) = tokio::io::split(stream);
+                connections.spawn(async move {
+                    let _ = connection(input, output, cli_pid, number, &hub).await;
+                    hub.entries.lock().expect("channel hub").retain(|_, e| e.connection != number);
+                });
+            }
+        }
+    };
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    hub.close();
+    listener.close();
+    closed
+}
+
+async fn connection<R, W>(input: R, mut output: W, pid: u32, number: u64, hub: &Hub) -> io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut input = Reader::new(input);
+    let hello = tokio::time::timeout(BUDGET, input.next()).await??;
+    let dir = PathBuf::from(
+        hello["config_dir"]
+            .as_str()
+            .ok_or_else(|| io::Error::other("config dir"))?,
+    );
+    let (sender, mut jobs) = mpsc::channel::<Job>(8);
+    let mut current: Option<Identity> = None;
+    loop {
+        tokio::select! {
+            frame = input.next() => {
+                let frame = frame?;
+                let claimed: Option<Identity> = serde_json::from_value(frame["identity"].clone()).ok();
+                let actual = identity(&dir, pid);
+                let mut entries = hub.entries.lock().expect("channel hub");
+                entries.retain(|_, e| e.connection != number);
+                current = claimed.filter(|id| Some(id) == actual.as_ref());
+                if let Some(id) = &current {
+                    entries.insert(id.clone(), Entry { connection: number,
+                        ready: frame["ready"] == true, sender: sender.clone() });
+                }
+            }
+            Some(mut job) = jobs.recv() => {
+                if current.is_none() || identity(&dir, pid) != current {
+                    let _ = job.reply.send(Delivery::SessionChanged);
+                    continue;
+                }
+                if job.deadline <= Instant::now() {
+                    let _ = job.reply.send(Delivery::Unavailable);
+                    continue;
+                }
+                job.started = true;
+                let request = json!({"identity": current, "text": job.text});
+                // After any write attempt, only an explicit pre-write rejection
+                // from the helper permits fallback. EOF/timeouts are uncertain.
+                let result = tokio::time::timeout_at(job.deadline.into(), async {
+                    write(&mut output, &request).await?;
+                    loop {
+                        let response = input.next().await?;
+                        if let Some(result) = response["delivery"].as_str() {
+                            return Ok::<_, io::Error>(match result {
+                                "sent" => Delivery::Sent,
+                                "unavailable" => Delivery::Unavailable,
+                                "session_changed" => Delivery::SessionChanged,
+                                _ => Delivery::Uncertain,
+                            });
+                        }
+                        // A heartbeat racing the request is not its receipt.
+                    }
+                }).await;
+                let delivery = result.ok().and_then(Result::ok).unwrap_or(Delivery::Uncertain);
+                let _ = job.reply.send(delivery);
+                if delivery == Delivery::Uncertain { return Err(io::Error::other("channel receipt lost")); }
+            }
+        }
+    }
+}
+
+pub fn main(data: &Path) -> Result<i32, String> {
+    mcp::run(data)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refused_peers_count_as_stale_when_they_may_be_another_deckd() {
+        let own = Path::new("/Applications/OpenWalkieTalkie.app/Contents/MacOS/deckd");
+        let refused = |exe: Option<&str>| PeerError::OtherExecutable { pid: 7, exe: exe.map(PathBuf::from) };
+        // A different copy of deckd, and a vanished one (path unresolvable).
+        assert_eq!(refused(Some("/var/folders/x/Sparkle/deckd")).other_deckd(own), Some(7));
+        assert_eq!(refused(None).other_deckd(own), Some(7));
+        // An unrelated same-user program, or a rejected peer, is not.
+        assert_eq!(refused(Some("/usr/bin/python3")).other_deckd(own), None);
+        assert_eq!(PeerError::Rejected(io::Error::other("x")).other_deckd(own), None);
+    }
+
+    #[test]
+    fn stale_count_forgets_exited_helpers_and_accepted_ones() {
+        let hub = Hub::default();
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let dead = child.id();
+        child.wait().unwrap();
+        hub.note_stale(std::process::id());
+        hub.note_stale(dead);
+        assert_eq!(hub.stale_count(), 1);
+        hub.clear_stale(std::process::id());
+        assert_eq!(hub.stale_count(), 0);
+    }
+
+    /// D4: the door is there only while the owner's switch is on. Off, a
+    /// helper's connect finds no socket, not even one an earlier run left;
+    /// on, the socket comes back within a poll, the owner's alone; off
+    /// again, it goes, and with it every link and every refusal the door was
+    /// counting. Stopping the daemon takes it down too.
+    #[tokio::test]
+    async fn the_door_is_open_only_while_the_switch_is_on() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        async fn until(what: &str, done: impl Fn() -> bool) {
+            tokio::time::timeout(BUDGET, async {
+                while !done() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{what}"));
+        }
+        // Short, for `sun_path`'s 103 bytes.
+        let dir = std::env::temp_dir().join(format!("dkch{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = socket(&dir);
+        // What an earlier run left behind.
+        std::fs::write(&path, b"").unwrap();
+        let on = Arc::new(AtomicBool::new(false));
+        let hub = Arc::new(Hub::default());
+        let (stop, stopped) = watch::channel(false);
+        let switch = {
+            let on = on.clone();
+            move || on.load(Ordering::SeqCst)
+        };
+        let poll = Duration::from_millis(20);
+        let door = tokio::spawn(serve_every(dir.clone(), hub.clone(), switch, poll, stopped));
+
+        tokio::time::sleep(poll * 5).await;
+        assert!(!path.exists(), "no door while the switch is off");
+        assert!(UnixStream::connect(&path).await.is_err());
+
+        on.store(true, Ordering::SeqCst);
+        until("the door opens", || path.exists()).await;
+        assert!(UnixStream::connect(&path).await.is_ok());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // A linked helper and a refused one, as the open door keeps them
+        // (pid 1 is alive and never this test's own connections).
+        let linked = hub.test_channel(42, "one");
+        hub.note_stale(1);
+        assert_eq!((hub.ready_count(), hub.stale_count()), (1, 1));
+
+        on.store(false, Ordering::SeqCst);
+        until("the door closes", || !path.exists()).await;
+        assert!(UnixStream::connect(&path).await.is_err());
+        assert_eq!((hub.ready_count(), hub.stale_count()), (0, 0));
+        assert_eq!(hub.status(), json!([]));
+        let ended = tokio::task::spawn_blocking(move || linked.recv_timeout(BUDGET))
+            .await
+            .unwrap();
+        assert!(ended.is_err(), "the helper's link ended with the door");
+
+        on.store(true, Ordering::SeqCst);
+        until("the door opens again", || path.exists()).await;
+        stop.send(true).unwrap();
+        tokio::time::timeout(BUDGET, door)
+            .await
+            .expect("the door stops with the daemon")
+            .unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn uncertain_delivery_never_retries_inbox() {
+        let missing = Inbox::socket_only("/no/such/socket");
+        assert_eq!(
+            finish_delivery(Delivery::Uncertain, Some(&missing), "hello")
+                .unwrap_err()
+                .reason(),
+            "channel_delivery_uncertain"
+        );
+        assert!(finish_delivery(Delivery::Sent, None, "hello").is_ok());
+    }
+
+    #[tokio::test]
+    async fn framing_handles_escaped_newlines_and_rejects_oversize() {
+        let mut input = Reader::new(&b"{\"text\":\"one\\ntwo\"}\n"[..]);
+        assert_eq!(input.next().await.unwrap()["text"], "one\ntwo");
+        let bytes = vec![b'x'; MAX_LINE + 1];
+        assert!(Reader::new(bytes.as_slice()).next().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn partial_frames_survive_select_cancellation() {
+        let (mut output, input) = tokio::io::duplex(256);
+        let mut input = Reader::new(input);
+        output.write_all(b"{\"text\":").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), input.next())
+                .await
+                .is_err()
+        );
+        output.write_all(b"\"hello\"}\n").await.unwrap();
+        assert_eq!(input.next().await.unwrap()["text"], "hello");
+    }
+
+    #[tokio::test]
+    async fn bridge_receipts_disconnects_and_session_changes() {
+        let dir = crate::core::testkit::temp("channel-connection");
+        std::fs::create_dir_all(dir.join("sessions")).unwrap();
+        let registry = dir.join("sessions/42.json");
+        std::fs::write(&registry, br#"{"pid":42,"sessionId":"one"}"#).unwrap();
+        let id = identity(&dir, 42).unwrap();
+        let hub = Arc::new(Hub::default());
+        let (server, client) = UnixStream::pair().unwrap();
+        let server_hub = hub.clone();
+        let server = tokio::spawn(async move {
+            let (read, write) = server.into_split();
+            connection(read, write, 42, 1, &server_hub).await
+        });
+        let (input, mut output) = client.into_split();
+        let mut input = Reader::new(input);
+        write(&mut output, &json!({"config_dir":dir}))
+            .await
+            .unwrap();
+        write(&mut output, &json!({"identity":id, "ready":false}))
+            .await
+            .unwrap();
+        tokio::time::timeout(BUDGET, async {
+            while hub.status().as_array().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(hub.status()[0]["state"], "checking");
+        write(&mut output, &json!({"identity":id, "ready":true}))
+            .await
+            .unwrap();
+        tokio::time::timeout(BUDGET, async {
+            while hub.status()[0]["state"] != "ready" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let sender = hub.entries.lock().unwrap()[&id].sender.clone();
+
+        for expected in [
+            Delivery::Sent,
+            Delivery::Unavailable,
+            Delivery::SessionChanged,
+        ] {
+            let (reply, received) = crossbeam_channel::bounded(1);
+            sender
+                .send(Job {
+                    text: "Please continue. 请继续。".into(),
+                    deadline: Instant::now() + BUDGET,
+                    reply,
+                    started: false,
+                })
+                .await
+                .unwrap();
+            let request = input.next().await.unwrap();
+            assert_eq!(request["identity"]["session"], "one");
+            assert_eq!(request["text"], "Please continue. 请继续。");
+            // A heartbeat racing a receipt must not count as delivery.
+            write(&mut output, &json!({"identity":id,"ready":true}))
+                .await
+                .unwrap();
+            write(&mut output, &json!({"delivery":match expected {
+                Delivery::Sent => "sent", Delivery::Unavailable => "unavailable", _ => "session_changed"
+            }})).await.unwrap();
+            let actual =
+                tokio::task::spawn_blocking(move || received.recv_timeout(BUDGET).unwrap())
+                    .await
+                    .unwrap();
+            assert_eq!(actual, expected);
+        }
+
+        // A /clear before the write cannot redirect dictation into the new session.
+        std::fs::write(&registry, br#"{"pid":42,"sessionId":"two"}"#).unwrap();
+        let (reply, received) = crossbeam_channel::bounded(1);
+        sender
+            .send(Job {
+                text: "old conversation".into(),
+                deadline: Instant::now() + BUDGET,
+                reply,
+                started: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::task::spawn_blocking(move || received.recv_timeout(BUDGET).unwrap())
+                .await
+                .unwrap(),
+            Delivery::SessionChanged
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), input.next())
+                .await
+                .is_err()
+        );
+
+        // Losing the receipt after writing is uncertain, never a fallback signal.
+        std::fs::write(&registry, br#"{"pid":42,"sessionId":"one"}"#).unwrap();
+        let (reply, received) = crossbeam_channel::bounded(1);
+        sender
+            .send(Job {
+                text: "only once".into(),
+                deadline: Instant::now() + BUDGET,
+                reply,
+                started: false,
+            })
+            .await
+            .unwrap();
+        input.next().await.unwrap();
+        drop(input);
+        drop(output);
+        assert_eq!(
+            tokio::task::spawn_blocking(move || received.recv_timeout(BUDGET).unwrap())
+                .await
+                .unwrap(),
+            Delivery::Uncertain
+        );
+        assert!(server.await.unwrap().is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_pre_write_refusal_uses_the_inbox() {
+        use std::io::Read;
+        let dir = crate::core::testkit::temp("channel-fallback");
+        let socket = dir.join("inbox.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let inbox = Inbox::socket_only(&socket);
+        finish_delivery(Delivery::Unavailable, Some(&inbox), "fallback").unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut text = String::new();
+        stream.read_to_string(&mut text).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["message"]["content"],
+            "fallback"
+        );
+        for result in [Delivery::Uncertain, Delivery::SessionChanged] {
+            assert!(finish_delivery(result, Some(&inbox), "do not retry").is_err());
+            assert!(listener.accept().is_err());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

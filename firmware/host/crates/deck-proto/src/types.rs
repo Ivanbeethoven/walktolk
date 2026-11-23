@@ -1,0 +1,967 @@
+//! The channel-5 vocabulary as host-side owned values. Wire names are the
+//! lowercase serde names (`kind:"claude"`, `b:"shift+left"`), so the same
+//! enums serve the daemon's JSON API unchanged.
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Claude,
+    Codex,
+    Gemini,
+    Other,
+    Conol,
+    // Grok Bot, bridged by deckd's `grokbot` module. Sent only to a deck
+    // that draws it (`Kind::for_deck`); any other deck gets `other`. A plain
+    // comment, not a doc one: the schema lists the kinds as one enum only
+    // while no variant has a description of its own.
+    Grok,
+}
+
+impl Kind {
+    /// How many kinds a deck draws when its hello does not say (`kinds`):
+    /// the protocol's list as it was before `grok` was appended.
+    pub const DRAWN_BY_DEFAULT: u8 = 5;
+
+    /// This kind's place in the protocol's list ([`KINDS`]), which is only
+    /// ever appended to: a deck's hello `kinds` counts a prefix of it.
+    #[must_use]
+    pub fn wire_index(self) -> usize {
+        KINDS
+            .iter()
+            .position(|(_, kind)| *kind == self)
+            .expect("every kind is in the protocol's list")
+    }
+
+    /// The kind to send a deck that draws the first `kinds` of the list
+    /// (`None`: a deck whose hello predates the field). A kind the deck
+    /// does not know is sent as `other`: an unknown `kind` would fail the
+    /// whole `agent` line on the deck, and the agent would not show at all.
+    #[must_use]
+    pub fn for_deck(self, kinds: Option<u8>) -> Kind {
+        let drawn = usize::from(kinds.unwrap_or(Self::DRAWN_BY_DEFAULT));
+        if self.wire_index() < drawn {
+            self
+        } else {
+            Kind::Other
+        }
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentState {
+    Working,
+    Question,
+    Ready,
+    Error,
+    Idle,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum CardKind {
+    Q,
+    R,
+}
+
+/// Which face the host measured a document with, so the deck draws with the
+/// same one. The deck never re-wraps a body the host has laid out — two
+/// wrapping implementations that can disagree is the defect this whole
+/// mechanism exists to avoid.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum DocFont {
+    Title,
+    Name,
+    Row,
+    /// 24 px Regular: the reply lane one step up from `Row`, for the
+    /// `text` size setting.
+    Text,
+    RichRow,
+    RichText,
+    RichTitle,
+}
+
+/// Which of a slot's long texts a window belongs to.
+///
+/// One mechanism, not three: the card body, the agent's last reply and the live
+/// transcript are all bodies the host lays out and the deck scrolls, and the
+/// only thing that differs is which lane draws them.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum DocKind {
+    Card,
+    Reply,
+    Workflow,
+    /// The live STT tail. Its window sits at the **end** of the body, not the
+    /// start: what the operator wants to see is the newest speech.
+    Tr,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Tone {
+    Blue,
+    Amber,
+    Green,
+    Red,
+    Gray,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct Window {
+    /// Absent draws gray.
+    pub tone: Option<Tone>,
+    pub title: String,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+pub enum Binding {
+    #[serde(rename = "left")]
+    Left,
+    #[serde(rename = "right")]
+    Right,
+    #[serde(rename = "enter")]
+    Enter,
+    #[serde(rename = "cw")]
+    Cw,
+    #[serde(rename = "ccw")]
+    Ccw,
+    #[serde(rename = "shift+left")]
+    ShiftLeft,
+    #[serde(rename = "shift+right")]
+    ShiftRight,
+    #[serde(rename = "shift+enter")]
+    ShiftEnter,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct MacroKey {
+    pub label: String,
+    /// A hardware control of the deck that presses this key; `None` = touch
+    /// (and the keystroke, if any) only.
+    pub binding: Option<Binding>,
+    /// The keystroke the daemon posts when the key is pressed:
+    /// `cmd+shift+4` (`keystroke_valid`). `None` = an event only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<String>,
+}
+
+/// The keys a keystroke may name, as the deck's `KEYS` table names them
+/// (the firmware's `msg::KEYS`, checked equal by a contract test).
+pub const KEYSTROKE_KEYS: &[&str] = &["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "up", "down", "left", "right", "enter", "esc", "tab", "space", "backspace", "delete", "home", "end", "pageup", "pagedown", "minus", "equal", "lbracket", "rbracket", "backslash", "semicolon", "quote", "comma", "period", "slash", "grave"];
+
+/// `ctrl+opt+shift+cmd+<key>`: modifiers in any order (`alt` = `opt`),
+/// exactly one key of `KEYSTROKE_KEYS`.
+#[must_use]
+pub fn keystroke_valid(combo: &str) -> bool {
+    let mut key = None;
+    for part in combo.split('+') {
+        match part {
+            "ctrl" | "opt" | "alt" | "shift" | "cmd" => {}
+            name => {
+                if key.is_some() || !KEYSTROKE_KEYS.contains(&name) {
+                    return false;
+                }
+                key = Some(name);
+            }
+        }
+    }
+    key.is_some()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct UsageItem {
+    pub name: String,
+    /// The account these windows belong to, when the source identifies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// 0..=100.
+    pub percent: u8,
+    pub reset: String,
+    /// An expiring redeemable reset reminder; absent when none is due.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_tip: Option<String>,
+    /// `None` derives the bar tone from `percent`.
+    pub tone: Option<Tone>,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Template {
+    Agents,
+    Omarchy,
+    Macropad,
+    Usage,
+    Settings,
+    Arcade,
+    System,
+    Timer,
+}
+
+/// Live computer metrics; zero capacity and absent percentages mean unavailable.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SystemStatus {
+    pub cpu: Option<u8>,
+    pub gpu: Option<u8>,
+    pub memory_used_mib: u32,
+    pub memory_total_mib: u32,
+    pub disk_free_mib: u32,
+    pub disk_total_mib: u32,
+    pub sample: u32,
+}
+impl SystemStatus {
+    pub const EMPTY: Self = Self { cpu: None, gpu: None, memory_used_mib: 0,
+        memory_total_mib: 0, disk_free_mib: 0, disk_total_mib: 0, sample: 0 };
+    pub fn valid(&self) -> bool {
+        self.cpu.is_none_or(|v| v <= 100) && self.gpu.is_none_or(|v| v <= 100)
+            && self.memory_used_mib <= self.memory_total_mib && self.disk_free_mib <= self.disk_total_mib
+    }
+}
+
+/// One strip entry: face id `f` (1..=8), template `t`, spoken name `n`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct FaceEntry {
+    pub f: u8,
+    pub t: Template,
+    pub n: String,
+}
+
+/// The most faces a strip holds: the deck's `MAX_FACES`, so a face's id is
+/// 1..=8.
+pub const STRIP_MAX: usize = 8;
+
+/// The most Macropads a strip holds: the deck keeps keys for three
+/// (`MAX_MACRO_SETS`).
+pub const MACROPADS_MAX: usize = 3;
+
+/// The most Timers a strip holds: the deck's clocks are one per deck, and
+/// its gallery offers no second Timer.
+pub const TIMERS_MAX: usize = 1;
+
+/// Why the deck would not take `list` as its strip, in the words
+/// `device.faces.set` refuses it with; `None` when it would.
+///
+/// The deck restores a strip only with Agents first and Settings last,
+/// neither of them in between, unique ids in 1..=8 and at most
+/// [`MACROPADS_MAX`] Macropads (`valid_strip`, `src/ui/state/manager.rs`).
+/// It answers any other with an `err range` the host cannot tie to the line,
+/// and drops it; its parser refuses a ninth face. Two rules are the host's
+/// own: every face has a name, and a strip holds one Timer at most
+/// ([`TIMERS_MAX`]), as the deck's gallery has it (its restore would take a
+/// second). The checks run in this order and the first one broken is the
+/// answer, so the four refusals `device.faces.set` made before the rest
+/// existed keep their words. The contract tests hold this to the firmware's
+/// text.
+#[must_use]
+pub fn strip_problem(list: &[FaceEntry]) -> Option<&'static str> {
+    if list.len() > STRIP_MAX {
+        return Some("max 8");
+    }
+    let mut seen = [false; STRIP_MAX + 1];
+    for entry in list {
+        if !(1..=STRIP_MAX as u8).contains(&entry.f) {
+            return Some("f 1..=8");
+        }
+        if std::mem::replace(&mut seen[usize::from(entry.f)], true) {
+            return Some("duplicate f");
+        }
+        if entry.n.trim().is_empty() {
+            return Some("empty name");
+        }
+    }
+    let Some((first, rest)) = list.split_first() else {
+        return Some("agents first");
+    };
+    if first.t != Template::Agents {
+        return Some("agents first");
+    }
+    let Some((last, middle)) = rest.split_last() else {
+        return Some("settings last");
+    };
+    if last.t != Template::Settings {
+        return Some("settings last");
+    }
+    if middle
+        .iter()
+        .any(|entry| matches!(entry.t, Template::Agents | Template::Settings))
+    {
+        return Some("agents or settings in the middle");
+    }
+    let count = |template: Template| list.iter().filter(|entry| entry.t == template).count();
+    if count(Template::Macropad) > MACROPADS_MAX {
+        return Some("max 3 macropads");
+    }
+    if count(Template::Timer) > TIMERS_MAX {
+        return Some("max 1 timer");
+    }
+    None
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum SetKey {
+    /// API setting; its device transport is the versioned `language` message.
+    Language,
+    Speaker,
+    Mic,
+    Announce,
+    Chime,
+    Autojump,
+    Brightness,
+    Idlehome,
+    Demo,
+    /// How big the deck draws a document it was sent: 0 small, 1 medium,
+    /// 2 large. The **host** has to know it, because the host is what wraps
+    /// the text — a size the two sides disagreed about would break every line
+    /// in a different place.
+    Textsize,
+    Arcadesound,
+}
+
+impl SetKey {
+    /// Ordinary wire settings, in boot push order. Language negotiates and
+    /// synchronizes independently, including boot:0; never push its default.
+    pub const ALL: [SetKey; 10] = [
+        SetKey::Speaker,
+        SetKey::Mic,
+        SetKey::Announce,
+        SetKey::Chime,
+        SetKey::Autojump,
+        SetKey::Brightness,
+        SetKey::Idlehome,
+        SetKey::Demo,
+        SetKey::Textsize,
+        SetKey::Arcadesound,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            SetKey::Language => "language",
+            SetKey::Speaker => "speaker",
+            SetKey::Mic => "mic",
+            SetKey::Announce => "announce",
+            SetKey::Chime => "chime",
+            SetKey::Autojump => "autojump",
+            SetKey::Brightness => "brightness",
+            SetKey::Idlehome => "idlehome",
+            SetKey::Demo => "demo",
+            SetKey::Textsize => "text",
+            SetKey::Arcadesound => "arcadesound",
+        }
+    }
+
+    /// True when `value` is inside the range the device accepts (P:124).
+    /// `idlehome` accepts anything (the device rounds up).
+    pub const fn accepts(self, value: u16) -> bool {
+        match self {
+            SetKey::Language => value <= 3,
+            SetKey::Speaker | SetKey::Mic => value <= 10,
+            SetKey::Announce | SetKey::Chime | SetKey::Autojump | SetKey::Demo => value <= 1,
+            SetKey::Brightness => value >= 1 && value <= 5,
+            SetKey::Idlehome => true,
+            // 0 small, 1 medium, 2 large.
+            SetKey::Textsize | SetKey::Arcadesound => value <= 2,
+        }
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyId {
+    Enter,
+    Cancel,
+    Left,
+    Right,
+    Cw,
+    Ccw,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum PttCtx {
+    Talk,
+    Answer,
+    Name,
+}
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ErrWhy {
+    Size,
+    Parse,
+    Range,
+    Unknown,
+}
+
+/// One host → device line (`docs/deck-protocol.md`, "Host → device"). `slot`
+/// is the wire's `id` on `agent` and `agent` everywhere else; strings are
+/// uncapped here and cut by `encode`.
+/// A single requested page of the device's per-session model/effort picker.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionMenu {
+    pub slot: u8,
+    pub rev: u16,
+    /// 0 overview, 1 model, 2 thinking effort.
+    pub field: u8,
+    pub page: u8,
+    pub model: String,
+    pub effort: String,
+    /// 0 read-only, 1 ready, 2 pending, 3 failed.
+    pub status: u8,
+    pub note: String,
+    pub choices: Vec<String>,
+    pub total: u8,
+    /// Absolute option index, not an index within the page.
+    pub selected: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "m", rename_all = "snake_case")]
+pub enum HostLine {
+    Language { value: u8, revision: u32 },
+    Image { slot: u8, rev: u16, index: u8, offset: u16, total: u16, width: u16, height: u16, data: String },
+    SessionMenu(SessionMenu),
+    Hello {
+        sid: u32,
+        /// `"HH:MM"`, the header clock.
+        hm: Option<String>,
+    },
+    Synced,
+    /// An absent field keeps the value the device has.
+    Agent {
+        slot: u8,
+        kind: Option<Kind>,
+        name: Option<String>,
+        /// `proj`: the project the session runs in (its working directory's
+        /// last component, `deck_model::project_label`); the device groups
+        /// its roster by it. Absent keeps the device's; `Some("")` is "no
+        /// project".
+        project: Option<String>,
+        state: Option<AgentState>,
+        title: Option<String>,
+        since_s: Option<u32>,
+        /// The session's major task, the roster's title (`task`). Absent
+        /// keeps the device's; `Some("")` is "none".
+        task: Option<String>,
+        /// Subagents and workflow runs in flight (`subs`), capped at 99.
+        subs: Option<u8>,
+    },
+    AgentGone {
+        slot: u8,
+    },
+    Card {
+        slot: u8,
+        id: u16,
+        kind: CardKind,
+        text: String,
+        /// Up to 4 on the wire; `encode` cuts the rest.
+        choices: Vec<String>,
+        /// 0-based recommended choice.
+        rec: Option<u8>,
+    },
+    CardClear {
+        slot: u8,
+        id: u16,
+    },
+    /// A window of the question, already wrapped by the host.
+    ///
+    /// `Card.text` stays what it always was — the first, capped slice — so a
+    /// deck that never scrolls, and a host that never sends this, behave
+    /// exactly as before. This carries the rest: `first` is where `lines[0]`
+    /// sits in the whole wrapped body and `total` is how long that body is, so
+    /// the deck can size a scrollbar truthfully from the first window on.
+    DocText {
+        slot: u8,
+        doc: DocKind,
+        /// The card id for `Card`; for `Reply` and `Tr` the per-slot revision
+        /// the matching `reply`/`transcript` line carries, so a window for a
+        /// body that has since been replaced is dropped rather than drawn over
+        /// the new one.
+        id: u16,
+        first: u16,
+        total: u16,
+        font: DocFont,
+        lines: Vec<String>,
+    },
+    Reply {
+        slot: u8,
+        text: String,
+        /// Bumped whenever the body changes; `DocText.id` matches it.
+        rev: u16,
+    },
+    /// Live STT tail; `last` is the wire's `final:1`.
+    Transcript {
+        slot: u8,
+        text: String,
+        last: bool,
+        press: Option<u16>,
+        failed: bool,
+        /// Show the Claude Channels setup hint during this device PTT session.
+        channel_tip: bool,
+        /// Recording for a companion's recogniser: no live words (`rec:1`).
+        rec: bool,
+    },
+    Focus {
+        slot: u8,
+        /// Echo of the device's `channel.seq`; absent always applies.
+        ack: Option<u16>,
+    },
+    Ws {
+        active: u8,
+        count: u8,
+        sel: u8,
+        windows: Vec<Window>,
+    },
+    Macro {
+        face: u8,
+        src: Option<String>,
+        keys: Vec<MacroKey>,
+    },
+    System(SystemStatus),
+    Usage {
+        period: String,
+        items: Vec<UsageItem>,
+    },
+    Faces {
+        list: Vec<FaceEntry>,
+    },
+    Name {
+        text: String,
+    },
+    Set {
+        key: SetKey,
+        value: u16,
+    },
+}
+
+impl HostLine {
+    /// The wire's `m` value.
+    pub const fn m(&self) -> &'static str {
+        match self {
+            HostLine::Language { .. } => "language",
+            HostLine::Image { .. } => "image",
+            HostLine::SessionMenu(_) => "session",
+            HostLine::Hello { .. } => "hello",
+            HostLine::Synced => "synced",
+            HostLine::Agent { .. } | HostLine::AgentGone { .. } => "agent",
+            HostLine::Card { .. } | HostLine::CardClear { .. } => "card",
+            // Its own `m`, unlike `CardClear`, which the device tells from a
+            // `card` by its missing fields: a window carries `lines` and no
+            // `type`, and giving it a name of its own keeps that unambiguous.
+            HostLine::DocText { .. } => "doc",
+            HostLine::Reply { .. } => "reply",
+            HostLine::Transcript { .. } => "transcript",
+            HostLine::Focus { .. } => "focus",
+            HostLine::Ws { .. } => "ws",
+            HostLine::Macro { .. } => "macro",
+            HostLine::Usage { .. } => "usage",
+            HostLine::System(_) => "system",
+            HostLine::Faces { .. } => "faces",
+            HostLine::Name { .. } => "name",
+            HostLine::Set { .. } => "set",
+        }
+    }
+}
+
+/// One device → host line ("Device → host"). `slot` is the wire's `agent`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "m", rename_all = "snake_case")]
+pub enum DeviceLine {
+    Language { value: u8, revision: u32 },
+    Image { slot: u8, rev: u16, index: u8, offset: u16 },
+    /// choice 255 requests a page; other choices require the displayed revision.
+    Session { slot: u8, field: u8, page: u8, rev: u16, choice: u8 },
+    Hello {
+        v: u8,
+        fw: String,
+        /// The sid the device holds a complete state for; 0 = resync.
+        sid: u32,
+        boot: bool,
+        rx: u16,
+        /// The sessions the deck holds (`agents`); `None` from a deck that
+        /// predates the field, which holds 8.
+        agents: Option<u8>,
+        /// Both fields present advertise versioned UI-language support.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lang: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lang_rev: Option<u32>,
+        /// How many of the protocol's agent kinds the deck draws
+        /// ([`Kind::for_deck`]); `None` from a deck that predates the
+        /// field, which draws [`Kind::DRAWN_BY_DEFAULT`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kinds: Option<u8>,
+        faces: Vec<FaceEntry>,
+    },
+    Key {
+        k: KeyId,
+        /// 1 press, 0 release, 2 step.
+        act: u8,
+        shift: bool,
+        f: u8,
+    },
+    Up,
+    Channel {
+        slot: u8,
+        seq: u16,
+    },
+    Ptt {
+        act: u8,
+        /// 0 = none.
+        slot: u8,
+        ctx: PttCtx,
+        card: Option<u16>,
+        abort: bool,
+        press: Option<u16>,
+    },
+    Answer {
+        slot: u8,
+        card: u16,
+        /// 0-based.
+        choice: u8,
+    },
+    Snooze {
+        slot: u8,
+        card: u16,
+    },
+    Macro {
+        f: u8,
+        /// 0..=8.
+        i: u8,
+        act: u8,
+    },
+    /// The deck's own key editor set slot `i` of Macropad `f` (`label`
+    /// present) or cleared it (no `label`). The host stores it and re-sends
+    /// the whole `macro`.
+    MacroKey {
+        f: u8,
+        /// 0..=8.
+        i: u8,
+        label: Option<String>,
+        binding: Option<Binding>,
+        /// `keystroke_valid`, or the line is refused.
+        keys: Option<String>,
+    },
+    WsGo(u8),
+    WsWin(u8),
+    /// "Send me the window that starts at `first`." Emitted when the operator
+    /// scrolls near the edge of the lines the deck is holding.
+    DocLines {
+        slot: u8,
+        doc: DocKind,
+        id: u16,
+        first: u16,
+    },
+    /// Toggle a tool row; stale document revisions are ignored.
+    Tool { slot: u8, id: u16, index: u8 },
+    Refresh {
+        what: String,
+    },
+    Set {
+        key: SetKey,
+        value: u16,
+    },
+    Faces {
+        list: Vec<FaceEntry>,
+    },
+    Face {
+        f: u8,
+    },
+    Err {
+        why: ErrWhy,
+    },
+}
+
+impl DeviceLine {
+    /// The wire's `m` value.
+    pub const fn m(&self) -> &'static str {
+        match self {
+            DeviceLine::Language { .. } => "language",
+            DeviceLine::Image { .. } => "image",
+            DeviceLine::Session { .. } => "session",
+            DeviceLine::Hello { .. } => "hello",
+            DeviceLine::Key { .. } => "key",
+            DeviceLine::Up => "up",
+            DeviceLine::Channel { .. } => "channel",
+            DeviceLine::Ptt { .. } => "ptt",
+            DeviceLine::Answer { .. } => "answer",
+            DeviceLine::Snooze { .. } => "snooze",
+            DeviceLine::Macro { .. } => "macro",
+            DeviceLine::MacroKey { .. } => "macrokey",
+            DeviceLine::WsGo(_) | DeviceLine::WsWin(_) => "ws",
+            DeviceLine::DocLines { .. } => "doclines",
+            DeviceLine::Tool { .. } => "tool",
+            DeviceLine::Refresh { .. } => "refresh",
+            DeviceLine::Set { .. } => "set",
+            DeviceLine::Faces { .. } => "faces",
+            DeviceLine::Face { .. } => "face",
+            DeviceLine::Err { .. } => "err",
+        }
+    }
+}
+
+/// The agent kinds in the protocol's own order, the firmware's `KINDS`
+/// (`src/deck/proto.rs`). Only ever appended to: a deck's hello `kinds`
+/// says how long a prefix of this list it draws.
+pub(crate) const KINDS: &[(&str, Kind)] = &[
+    ("claude", Kind::Claude),
+    ("codex", Kind::Codex),
+    ("gemini", Kind::Gemini),
+    ("other", Kind::Other),
+    ("conol", Kind::Conol),
+    ("grok", Kind::Grok),
+];
+pub(crate) const STATES: &[(&str, AgentState)] = &[
+    ("working", AgentState::Working),
+    ("question", AgentState::Question),
+    ("ready", AgentState::Ready),
+    ("error", AgentState::Error),
+    ("idle", AgentState::Idle),
+];
+pub(crate) const TONES: &[(&str, Tone)] = &[
+    ("blue", Tone::Blue),
+    ("amber", Tone::Amber),
+    ("green", Tone::Green),
+    ("red", Tone::Red),
+    ("gray", Tone::Gray),
+];
+pub(crate) const TEMPLATES: &[(&str, Template)] = &[
+    ("agents", Template::Agents),
+    ("omarchy", Template::Omarchy),
+    ("macropad", Template::Macropad),
+    ("usage", Template::Usage),
+    ("settings", Template::Settings),
+    ("arcade", Template::Arcade),
+    ("system", Template::System),
+    ("timer", Template::Timer),
+];
+pub(crate) const BINDINGS: &[(&str, Binding)] = &[
+    ("left", Binding::Left),
+    ("right", Binding::Right),
+    ("enter", Binding::Enter),
+    ("cw", Binding::Cw),
+    ("ccw", Binding::Ccw),
+    ("shift+left", Binding::ShiftLeft),
+    ("shift+right", Binding::ShiftRight),
+    ("shift+enter", Binding::ShiftEnter),
+];
+pub(crate) const KEYS: &[(&str, KeyId)] = &[
+    ("enter", KeyId::Enter),
+    ("cancel", KeyId::Cancel),
+    ("left", KeyId::Left),
+    ("right", KeyId::Right),
+    ("cw", KeyId::Cw),
+    ("ccw", KeyId::Ccw),
+];
+pub(crate) const CTXS: &[(&str, PttCtx)] = &[
+    ("talk", PttCtx::Talk),
+    ("answer", PttCtx::Answer),
+    ("name", PttCtx::Name),
+];
+pub(crate) const WHYS: &[(&str, ErrWhy)] = &[
+    ("size", ErrWhy::Size),
+    ("parse", ErrWhy::Parse),
+    ("range", ErrWhy::Range),
+    ("unknown", ErrWhy::Unknown),
+];
+
+pub(crate) fn name_of<T: PartialEq + Copy>(table: &[(&'static str, T)], value: T) -> &'static str {
+    // Every table covers its enum; "" would only mean a table fell behind.
+    table
+        .iter()
+        .find(|(_, member)| *member == value)
+        .map_or("", |(name, _)| name)
+}
+
+pub(crate) fn member_of<T: Copy>(table: &[(&'static str, T)], name: &str) -> Option<T> {
+    table
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, member)| *member)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serde_names_match_the_wire_vocabulary() {
+        assert_eq!(serde_json::to_string(&Kind::Claude).unwrap(), "\"claude\"");
+        assert_eq!(serde_json::to_string(&CardKind::Q).unwrap(), "\"q\"");
+        assert_eq!(
+            serde_json::to_string(&Binding::ShiftEnter).unwrap(),
+            "\"shift+enter\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SetKey::Idlehome).unwrap(),
+            "\"idlehome\""
+        );
+        for (name, key) in KEYS {
+            assert_eq!(serde_json::to_string(key).unwrap(), format!("\"{name}\""));
+        }
+        for (name, binding) in BINDINGS {
+            assert_eq!(member_of(BINDINGS, name), Some(*binding));
+            assert_eq!(name_of(BINDINGS, *binding), *name);
+        }
+    }
+
+    #[test]
+    fn set_key_ranges_follow_the_contract() {
+        assert!(SetKey::Speaker.accepts(10));
+        assert!(!SetKey::Speaker.accepts(11));
+        assert!(!SetKey::Brightness.accepts(0));
+        assert!(SetKey::Brightness.accepts(5));
+        assert!(!SetKey::Chime.accepts(2));
+        assert!(SetKey::Idlehome.accepts(45));
+        assert!(SetKey::Textsize.accepts(2));
+        assert!(!SetKey::Textsize.accepts(3));
+        assert_eq!(SetKey::ALL.len(), 10);
+    }
+
+    #[test]
+    fn line_m_names_match_the_protocol_table() {
+        assert_eq!(HostLine::Synced.m(), "synced");
+        assert_eq!(HostLine::AgentGone { slot: 1 }.m(), "agent");
+        assert_eq!(HostLine::CardClear { slot: 1, id: 1 }.m(), "card");
+        assert_eq!(DeviceLine::WsGo(1).m(), "ws");
+        assert_eq!(DeviceLine::Up.m(), "up");
+    }
+
+    /// A strip of `(f, t)`, each face called by its template.
+    fn strip(faces: &[(u8, Template)]) -> Vec<FaceEntry> {
+        faces
+            .iter()
+            .map(|&(f, t)| FaceEntry { f, t, n: format!("{t:?}") })
+            .collect()
+    }
+
+    #[test]
+    fn the_decks_power_on_strip_and_the_boards_pass() {
+        use Template::{Agents, Arcade, Macropad, Omarchy, Settings, System, Timer, Usage};
+        // The deck's power-on strip, each face by its own id.
+        let power_on = strip(&[
+            (1, Agents),
+            (2, Omarchy),
+            (3, Macropad),
+            (4, Usage),
+            (7, System),
+            (6, Arcade),
+            (5, Settings),
+        ]);
+        // The app's boards: seven faces with a Timer, and all eight.
+        let board = strip(&[
+            (1, Agents),
+            (3, Macropad),
+            (4, Usage),
+            (7, System),
+            (8, Timer),
+            (6, Arcade),
+            (5, Settings),
+        ]);
+        let mut full = board.clone();
+        full.insert(1, FaceEntry { f: 2, t: Omarchy, n: "Omarchy".into() });
+        assert_eq!(full.len(), STRIP_MAX);
+        // The barest strip, and the most Macropads and Timers, any ids.
+        let bare = strip(&[(8, Agents), (1, Settings)]);
+        let most = strip(&[
+            (1, Agents),
+            (2, Macropad),
+            (3, Macropad),
+            (4, Macropad),
+            (5, Timer),
+            (6, Settings),
+        ]);
+        for list in [power_on, board, full, bare, most] {
+            assert_eq!(strip_problem(&list), None, "{list:?}");
+        }
+    }
+
+    /// One strip for each refusal, and strips that break several rules:
+    /// the first rule in the order is the answer.
+    #[test]
+    fn a_strip_the_deck_would_refuse_says_why_and_the_first_rule_broken_is_the_answer() {
+        use Template::{Agents, Arcade, Macropad, Settings, Timer, Usage};
+        let blank = |n: &str| {
+            vec![
+                FaceEntry { f: 1, t: Agents, n: n.into() },
+                FaceEntry { f: 5, t: Settings, n: "Settings".into() },
+            ]
+        };
+        let nine: Vec<(u8, Template)> = (1..=9).map(|f| (f, Usage)).collect();
+        // Four Macropads, and with two Timers as well: eight faces.
+        let pads = [
+            (1, Agents),
+            (2, Macropad),
+            (3, Macropad),
+            (4, Macropad),
+            (6, Macropad),
+            (5, Settings),
+        ];
+        let mut pads_and_timers = pads.to_vec();
+        pads_and_timers.insert(5, (7, Timer));
+        pads_and_timers.insert(6, (8, Timer));
+        let inside = "agents or settings in the middle";
+        for (list, why) in [
+            // Today's four, in today's order.
+            (strip(&nine), "max 8"),
+            (strip(&[(0, Agents), (5, Settings)]), "f 1..=8"),
+            (strip(&[(1, Agents), (9, Settings)]), "f 1..=8"),
+            (strip(&[(1, Agents), (1, Settings)]), "duplicate f"),
+            (blank(""), "empty name"),
+            (blank(" \u{3000}"), "empty name"),
+            // The ends.
+            (Vec::new(), "agents first"),
+            (strip(&[(5, Settings)]), "agents first"),
+            (strip(&[(4, Usage), (1, Agents), (5, Settings)]), "agents first"),
+            (strip(&[(1, Agents)]), "settings last"),
+            (strip(&[(1, Agents), (4, Usage)]), "settings last"),
+            (strip(&[(1, Agents), (5, Settings), (4, Usage)]), "settings last"),
+            // Neither end in between.
+            (strip(&[(1, Agents), (2, Agents), (5, Settings)]), inside),
+            (strip(&[(1, Agents), (6, Settings), (5, Settings)]), inside),
+            // The Macropads and the Timer.
+            (strip(&pads), "max 3 macropads"),
+            (strip(&[(1, Agents), (7, Timer), (8, Timer), (5, Settings)]), "max 1 timer"),
+            // Several at once.
+            (strip(&[(0, Settings), (0, Settings)]), "f 1..=8"),
+            (strip(&[(4, Usage), (4, Usage)]), "duplicate f"),
+            (strip(&[(5, Settings), (1, Agents)]), "agents first"),
+            (strip(&[(1, Agents), (5, Settings), (2, Agents), (6, Arcade)]), "settings last"),
+            (strip(&pads_and_timers), "max 3 macropads"),
+        ] {
+            assert_eq!(strip_problem(&list), Some(why), "{list:?}");
+        }
+        // The words carry the limits.
+        assert_eq!(format!("max {STRIP_MAX}"), "max 8");
+        assert_eq!(format!("f 1..={STRIP_MAX}"), "f 1..=8");
+        assert_eq!(format!("max {MACROPADS_MAX} macropads"), "max 3 macropads");
+        assert_eq!(format!("max {TIMERS_MAX} timer"), "max 1 timer");
+    }
+}

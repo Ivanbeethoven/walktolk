@@ -1,0 +1,197 @@
+name: Release
+on:
+  push:
+    tags: ['v*.*.*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 tools/release.py validate "$TAG"
+  checks:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+  macos:
+    needs: [validate, checks]
+    environment: release
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.98.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: firmware-*
+          path: dist/firmware
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Sign, notarize, and create the update feed
+        env:
+          ARCH: ${{ matrix.arch }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY_P8_BASE64: ${{ secrets.APPLE_API_PRIVATE_KEY_P8_BASE64 }}
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+        run: bash tools/release-macos.sh "$ARCH" "$TAG"
+      - name: Preserve packages for notarization recovery
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notarization-recovery-${{ matrix.arch }}
+          path: |
+            dist/macos/*.dmg
+            dist/macos/release-manifest.json
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/macos/*.dmg
+            dist/macos/appcast-*.xml
+            dist/macos/package-manifest-*.json
+          if-no-files-found: error
+          compression-level: 0
+  windows:
+    needs: [validate, checks]
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.98.1
+      # Unsigned by decision (code signing costs more than the preview is
+      # worth); the website's install guide covers SmartScreen instead.
+      - name: Build and package the Windows preview
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          cargo build --manifest-path host/Cargo.toml -p deckd -p openwalkietalkie-app --release --locked --target x86_64-pc-windows-msvc --target-dir target/host
+          built=target/host/x86_64-pc-windows-msvc/release
+          python tools/package-windows.py --version "${TAG#v}" --deckd "$built/deckd.exe" --app "$built/openwalkietalkie-app.exe" --output dist/windows
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-x86_64
+          path: |
+            dist/windows/*.zip
+            dist/windows/*.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+  publish:
+    needs: [validate, checks, macos, windows]
+    runs-on: ubuntu-24.04
+    environment: release
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: firmware-*
+          path: dist/release
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: macos-*
+          path: dist/release
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: windows-*
+          path: dist/release
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: factory-ftab
+          path: dist/factory-input
+          digest-mismatch: error
+      - name: Package full-chip factory images
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          for board in hw-a hw-b; do
+            output="dist/factory/OpenWalkieTalkie-$version-factory-$board"
+            python3 tools/factory-image.py --firmware-dir dist/release --board "$board" \
+              --ftab dist/factory-input/factory-ftab.bin --version "$version" --output "$output"
+            python3 "$output/verify.py"
+            cp "$output.zip" "$output.zip.sha256" dist/release/
+          done
+      - name: Create the updater manifest and checksums
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          if [[ -f "docs/releases/${TAG#v}.zh-CN.md" ]]; then
+            cp "docs/releases/${TAG#v}.zh-CN.md" dist/release/README.zh-CN.md
+          fi
+          python3 tools/release.py manifest "$TAG" dist/release
+          cd dist/release
+          sha256sum --check SHA256SUMS
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/release/*
+      - name: Publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="docs/releases/${TAG#v}.md"
+          if release=$(gh release view "$TAG" --json isDraft 2>/dev/null); then
+            if [[ $(jq -r '.isDraft' <<< "$release") != true ]]; then
+              echo 'Published releases are immutable; choose a new version.' >&2
+              exit 1
+            fi
+            gh release upload "$TAG" dist/release/* --clobber
+          else
+            if [[ -f "$notes" ]]; then
+              gh release create "$TAG" dist/release/* --verify-tag --draft --notes-file "$notes" --title "OpenWalkieTalkie $TAG"
+            else
+              gh release create "$TAG" dist/release/* --verify-tag --draft --generate-notes --title "OpenWalkieTalkie $TAG"
+            fi
+          fi
+          if [[ -f "$notes" ]]; then gh release edit "$TAG" --notes-file "$notes"; fi
+          gh release edit "$TAG" --draft=false --latest

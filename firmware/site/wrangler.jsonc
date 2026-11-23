@@ -1,0 +1,45 @@
+// openwalkietalkie.org — static pages and a D1-backed hardware waitlist.
+// Deploy from this directory: npx wrangler deploy
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "openwalkietalkie-site",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"],
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "openwalkietalkie-site",
+      "database_id": "ad07eb7b-b416-4d6a-98d4-5e5431163fc3",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "WAITLIST_LIMITER",
+      "namespace_id": "575420261016",
+      "simple": { "limit": 5, "period": 60 }
+    }
+  ],
+  "triggers": { "crons": ["17 3 * * *"] },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  },
+  // Preview URL on workers.dev in addition to the custom domain.
+  "workers_dev": true,
+  // Requires the openwalkietalkie.org zone to exist on the Cloudflare account
+  // (its nameservers already point at Cloudflare). Wrangler provisions DNS +
+  // certificates for custom domains automatically.
+  "routes": [
+    { "pattern": "openwalkietalkie.org", "custom_domain": true },
+    { "pattern": "www.openwalkietalkie.org", "custom_domain": true }
+  ]
+}

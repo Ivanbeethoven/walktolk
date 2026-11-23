@@ -5,11 +5,10 @@ DeepSeek Harness peripheral: its 480脳480 screen shows the live agent roster, a
 question or an approval arrives as a card you answer with the wheel and ENTER,
 and the harness gets that answer back.
 
-**Status.** The wire, the session, the roster and the card board are implemented
-and covered by tests. Everything is verified end to end against an in-memory
-fake deck (`transport: sim`). Against real hardware, the handshake, the roster
-and the card path work on a **0.7.0** deck, which is old enough to lack parts of
-the vocabulary; see *Firmware versions* below.
+On Rev A, the Android bridge and desktop plugin have been tested with a real
+deck over USB-OTG and Bluetooth. Tests on the device covered session browsing,
+questions, approvals and push-to-talk. The [project write-up](../docs/deck-and-dsh.md)
+describes the phone connection and the Bluetooth voice tests.
 
 ## Install
 
@@ -121,8 +120,9 @@ rather than assuming the newest build. Everything below was measured on a
   so `maxChoices` is 2 below 0.10.0.
 - `kind`, `proj` and `since` are already understood by 0.7.0.
 
-Flashing 0.15.0 removes all of this, and is the intended path:
-`tools/flash-usb.py <elf>` from the firmware repository.
+For the Android Bluetooth bridge, use the [custom Rev A firmware](../firmware/),
+based on upstream v0.14.0. Its [protocol documentation](../firmware/docs/deck-protocol.md)
+describes the encrypted channel-5 GATT service.
 
 ### 0.14.0, measured later
 
