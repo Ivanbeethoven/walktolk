@@ -6,9 +6,8 @@ license = "MIT"
 description = "OpenWalkieTalkie firmware (SiFli SF32LB52x, embassy)"
 
 [dependencies]
-# Pinned to a git revision, not the crates.io release: sifli-hal 0.1.1 on
-# crates.io predates the I2C driver, and I2C is the entire input path here.
-# Re-pin deliberately -- the HAL is explicitly pre-1.0 and "working in progress".
+# The local HAL and radio are based on OpenSiFli/sifli-rs revision
+# aa4c19c5cf014f07d275ebaf233480807cdb8685, with whole-packet HCI transmission.
 #
 # `unstable-pac` covers the ADC slot-routing workaround, factory reference
 # trim and SF32LB52 DAC clock correction, which the pinned HAL doesn't expose.
@@ -16,7 +15,7 @@ description = "OpenWalkieTalkie firmware (SiFli SF32LB52x, embassy)"
 # Default features off for one reason: the HAL's `set-msplim` defines
 # cortex-m-rt's `__pre_init`, which src/xip.rs has to own (it sets MSPLIM
 # itself). The rest of the HAL's defaults are listed back.
-sifli-hal = { git = "https://github.com/OpenSiFli/sifli-rs", rev = "aa4c19c5cf014f07d275ebaf233480807cdb8685", default-features = false, features = [
+sifli-hal = { path = "vendor/sifli-rs/sifli-hal", default-features = false, features = [
     "rt",
     "time",
     "sf32lb52x",
@@ -24,7 +23,7 @@ sifli-hal = { git = "https://github.com/OpenSiFli/sifli-rs", rev = "aa4c19c5cf01
     "time-driver-gptim2",
     "unstable-pac",
 ] }
-sifli-radio = { git = "https://github.com/OpenSiFli/sifli-rs", rev = "aa4c19c5cf014f07d275ebaf233480807cdb8685", default-features = false, features = ["sf32lb52x-lcpu", "log"] }
+sifli-radio = { path = "vendor/sifli-rs/sifli-radio", default-features = false, features = ["sf32lb52x-lcpu", "log"] }
 # The queue sizes are for the voice link: speaker frames arrive as write
 # commands, 50 a second, and wait in the per-connection RX queue whenever the
 # GATT task is held up by channel-5 back-pressure (8 slots = 160 ms, then

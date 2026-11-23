@@ -1,0 +1,336 @@
+//! LCPU patch installation module.
+//!
+//! This module handles both:
+//! - **Hardware patching**: Configuring the PATCH peripheral to intercept and replace instructions
+//! - **Software patching**: Copying patch code into LCPU RAM
+//!
+//! The PATCH hardware is a breakpoint/replacement mechanism that allows runtime patching of ROM code.
+//!
+//! # Reference
+//! - `SiFli-SDK/drivers/hal/bf0_hal_patch.c`
+//! - `SiFli-SDK/drivers/Include/bf0_hal_patch.h`
+//!
+//! # Example
+//! ```ignore
+//! use sifli_hal::patch;
+//!
+//! patch::install(&PATCH_LIST_BYTES, &PATCH_BIN_BYTES)?;
+//! ```
+
+use crate::ram::memory_map::{a3, letter};
+use crate::ram::RamSlice;
+use crate::pac;
+use crate::syscfg::ChipRevision;
+
+/// A3 patch record header magic value ("PTCH").
+const A3_PATCH_MAGIC: u32 = 0x5054_4348;
+/// Letter Series patch header magic value ("PACH").
+const LETTER_PATCH_MAGIC: u32 = 0x4843_4150;
+/// Letter Series fixed entry count.
+const LETTER_ENTRY_COUNT: u32 = 7;
+
+//=============================================================================
+// Constants
+//=============================================================================
+
+/// Maximum number of patch channels supported by hardware.
+///
+/// Reference: `SiFli-SDK/drivers/Include/bf0_hal_patch.h:69`
+const MAX_PATCH_ENTRIES: usize = 32;
+
+/// Address mask for patch channel (bits 18:2).
+///
+/// Reference: `SiFli-SDK/drivers/Include/register.h` (PATCH_CH0_ADDR_Msk)
+const PATCH_ADDR_MASK: u32 = 0x0007_FFFC;
+
+//=============================================================================
+// Error types
+//=============================================================================
+
+/// Patch installation error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Error {
+    /// Patch record list is empty.
+    EmptyRecord,
+
+    /// Patch code array is empty.
+    EmptyCode,
+
+    /// Patch code exceeds available space.
+    CodeTooLarge {
+        /// Actual size (bytes).
+        size_bytes: usize,
+        /// Maximum allowed size (bytes).
+        max_bytes: usize,
+    },
+
+    /// Invalid or unsupported chip revision.
+    InvalidRevision {
+        /// Revision ID (`REVID`).
+        revid: u8,
+    },
+
+    /// Invalid patch record (bad magic).
+    InvalidRecordMagic {
+        /// Actual magic value found.
+        actual: u32,
+        /// Expected magic value.
+        expected: u32,
+    },
+
+    /// Too many patch entries for hardware.
+    TooManyEntries {
+        /// Number of entries requested.
+        count: usize,
+    },
+}
+
+//=============================================================================
+// Patch Entry Structure
+//=============================================================================
+
+/// A single patch entry descriptor.
+///
+/// Matches the SDK's `struct patch_entry_desc`.
+///
+/// Reference: `SiFli-SDK/drivers/Include/bf0_hal_patch.h:71-76`
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PatchEntry {
+    /// Breakpoint address (must be 4-byte aligned).
+    pub break_addr: u32,
+    /// Replacement data (instruction or branch).
+    pub data: u32,
+}
+
+//=============================================================================
+// Hardware Operations
+//=============================================================================
+
+/// Install patches into the PATCH hardware peripheral.
+///
+/// This reads the patch record from LCPU RAM and configures the PATCH hardware
+/// to intercept and replace instructions at runtime.
+///
+/// # Arguments
+/// * `record_addr` - Address of the patch record in LCPU RAM
+///
+/// # Returns
+/// * `Ok(enabled_mask)` - Bitmask of enabled patch channels
+/// * `Err(...)` - If the record is invalid or has too many entries
+///
+/// # Safety
+/// The caller must ensure `record_addr` points to valid, readable memory
+/// containing a properly formatted patch record.
+///
+/// # Reference
+/// `SiFli-SDK/drivers/hal/bf0_hal_patch.c:HAL_PATCH_install()`
+pub fn hal_patch_install(record_addr: usize) -> Result<u32, Error> {
+    // Read header using unaligned access — the record may reside in a &[u8]
+    // slice without alignment guarantee (unlike SDK's `const unsigned int[]`).
+    let tag = unsafe { core::ptr::read_unaligned(record_addr as *const u32) };
+    let size_bytes = unsafe { core::ptr::read_unaligned((record_addr + 4) as *const u32) };
+
+    // Verify magic tag
+    if tag != A3_PATCH_MAGIC {
+        return Err(Error::InvalidRecordMagic {
+            actual: tag,
+            expected: A3_PATCH_MAGIC,
+        });
+    }
+
+    // Calculate number of entries
+    let entry_count = size_bytes as usize / core::mem::size_of::<PatchEntry>();
+    if entry_count > MAX_PATCH_ENTRIES {
+        return Err(Error::TooManyEntries { count: entry_count });
+    }
+
+    // Get pointer to entries (after 8-byte header)
+    let entries_addr = record_addr + 8;
+
+    // Install entries into hardware
+    let enabled = hal_patch_install_entries(entries_addr, entry_count)?;
+
+    Ok(enabled)
+}
+
+/// Install patch entries into hardware.
+///
+/// Low-level function that writes directly to PATCH peripheral registers.
+///
+/// # Reference
+/// `SiFli-SDK/drivers/hal/bf0_hal_patch.c:HAL_PATCH_install2()`
+fn hal_patch_install_entries(entries_addr: usize, count: usize) -> Result<u32, Error> {
+    if count > MAX_PATCH_ENTRIES {
+        return Err(Error::TooManyEntries { count });
+    }
+
+    // Ensure PATCH peripheral clock is enabled (LPSYS_RCC ENR1 bit 4).
+    // The clock may be disabled after LCPU reset. Without it, AHB bus access
+    // to the PATCH registers will stall indefinitely.
+    pac::LPSYS_RCC.esr1().write(|w| w.set_patch(true));
+
+    let patch = pac::PATCH;
+    let mut enabled_mask: u32 = 0;
+
+    // Disable all channels first
+    patch.cer().write(|w| w.set_ce(0));
+
+    for i in 0..count {
+        // Read entry using unaligned access (data may not be 4-byte aligned).
+        let entry_offset = entries_addr + i * core::mem::size_of::<PatchEntry>();
+        let break_addr = unsafe { core::ptr::read_unaligned(entry_offset as *const u32) };
+        let data = unsafe { core::ptr::read_unaligned((entry_offset + 4) as *const u32) };
+
+        let addr_masked = break_addr & PATCH_ADDR_MASK;
+
+        // Write breakpoint address to channel register (bits 18:2)
+        patch.ch(i).write(|w| w.set_addr(addr_masked >> 2));
+
+        // Select channel and write replacement data
+        patch.csr().write(|w| w.set_cs(1 << i));
+        patch.cdr().write(|w| w.set_data(data));
+
+        enabled_mask |= 1 << i;
+    }
+
+    // Clear channel selection
+    patch.csr().write(|w| w.set_cs(0));
+
+    // Enable all configured channels
+    patch.cer().write(|w| w.set_ce(enabled_mask));
+
+    Ok(enabled_mask)
+}
+
+/// Disable all patch channels.
+pub fn hal_patch_disable_all() {
+    pac::PATCH.cer().write(|w| w.set_ce(0));
+}
+
+/// Read current patch enable mask.
+pub fn hal_patch_get_enabled() -> u32 {
+    pac::PATCH.cer().read().ce()
+}
+
+//=============================================================================
+// High-Level API
+//=============================================================================
+
+/// High-level helper to install LCPU patches based on chip revision.
+///
+/// This function:
+/// 1. Copies the patch record to LCPU RAM
+/// 2. Configures the PATCH hardware to apply instruction replacements
+/// 3. Copies the patch code to LCPU RAM
+///
+/// # Example
+/// ```ignore
+/// use sifli_hal::patch;
+///
+/// patch::install(&PATCH_LIST_BYTES, &PATCH_BIN_BYTES)?;
+/// ```
+pub fn install(rev: ChipRevision, list: &[u8], bin: &[u8]) -> Result<(), Error> {
+    // Parameter validation
+    if list.is_empty() {
+        return Err(Error::EmptyRecord);
+    }
+    if bin.is_empty() {
+        return Err(Error::EmptyCode);
+    }
+
+    if !rev.is_valid() {
+        return Err(Error::InvalidRevision { revid: rev.revid() });
+    }
+
+    // Dispatch to A3 or Letter-Series patch installer based on revision
+    match rev {
+        ChipRevision::A3OrEarlier(_) => install_a3(list, bin),
+        _ => install_letter(list, bin),
+    }
+}
+
+/// Install A3 / earlier-format patches.
+///
+/// Execution order (matching SDK):
+/// 1. Copy patch record list to RAM
+/// 2. Configure PATCH hardware (read record, setup breakpoints)
+/// 3. Clear and copy patch code to RAM
+fn install_a3(list: &[u8], bin: &[u8]) -> Result<(), Error> {
+    let code_size = bin.len();
+    if code_size > a3::PATCH_TOTAL_SIZE {
+        return Err(Error::CodeTooLarge {
+            size_bytes: code_size,
+            max_bytes: a3::PATCH_TOTAL_SIZE,
+        });
+    }
+
+    // Step 1: Copy patch record list to RAM
+    RamSlice::new(a3::PATCH_RECORD_ADDR, a3::PATCH_RECORD_SIZE).copy_from_slice(list);
+
+    // Step 2: Configure PATCH hardware (reads from RAM we just wrote)
+    match hal_patch_install(a3::PATCH_RECORD_ADDR) {
+        Ok(_) => {}
+        Err(e) => {
+            warn!("  PATCH HW install failed: {:?}", e);
+            // Continue anyway - the patch code may still be useful
+        }
+    }
+
+    // Step 3+4: Clear patch code area and copy code.
+    // Clear overwrites the record, but hardware is already configured in step 2.
+    let code = RamSlice::new(a3::PATCH_CODE_START, a3::PATCH_TOTAL_SIZE);
+    code.clear();
+    code.copy_from_slice(bin);
+
+    Ok(())
+}
+
+/// Install Letter-Series patches (A4/B4 and later).
+///
+/// Letter-Series uses a different memory layout with a header at LETTER_BUF_START.
+/// Two separate mechanisms are installed:
+/// 1. **PACH header** at 0x20405000: ROM reads this to find patch code entry point
+/// 2. **PTCH hardware entries** from `list`: programs PATCH peripheral to intercept ROM instructions
+///
+/// Reference: `lcpu_patch_rev_b.c:lcpu_patch_install_rev_b()` + `bf0_hal_patch.c:HAL_PATCH_install()`
+fn install_letter(list: &[u8], bin: &[u8]) -> Result<(), Error> {
+    let code_size = bin.len();
+    if code_size > letter::PATCH_CODE_SIZE {
+        return Err(Error::CodeTooLarge {
+            size_bytes: code_size,
+            max_bytes: letter::PATCH_CODE_SIZE,
+        });
+    }
+
+    // Step 0: Clear LCPU code RAM area before patch install.
+    // Reference: bf0_lcpu_init.c: memset((void *)0x20400000, 0, 0x500)
+    RamSlice::new(crate::ram::memory_map::shared::LPSYS_RAM_BASE, 0x500).clear();
+
+    // Step 1: Write PACH header (12 bytes) - for ROM to find patch code entry point.
+    // Reference: lcpu_patch_rev_b.c:60-66
+    let patch_buf = RamSlice::new(letter::PATCH_BUF_START, letter::PATCH_BUF_SIZE);
+    patch_buf.write(0, LETTER_PATCH_MAGIC); // magic: "PACH"
+    patch_buf.write(4, LETTER_ENTRY_COUNT); // entry_count (fixed)
+    patch_buf.write(8, letter::PATCH_CODE_START_LCPU as u32 + 1); // code_addr + Thumb bit
+
+    // Step 2: Clear patch code area and copy patch binary.
+    let code = RamSlice::new(letter::PATCH_CODE_START, letter::PATCH_CODE_SIZE);
+    code.clear();
+    code.copy_from_slice(bin);
+
+    // Step 3: Install hardware PATCH entries from list data (PTCH tag + 6 entries).
+    // SDK: HAL_PATCH_install() reads from HAL_PATCH_GetEntryAddr() which returns g_lcpu_patch_list.
+    // The list contains PTCH tag (0x50544348) + size + 6 patch entries that program the
+    // PATCH hardware peripheral to intercept and replace ROM instructions at runtime.
+    // Reference: bf0_hal_patch.c:HAL_PATCH_install() -> HAL_PATCH_install2()
+    match hal_patch_install(list.as_ptr() as usize) {
+        Ok(_) => {}
+        Err(e) => {
+            warn!("PATCH HW install failed: {:?}", e);
+        }
+    }
+
+    Ok(())
+}

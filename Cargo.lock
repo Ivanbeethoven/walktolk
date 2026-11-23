@@ -1289,7 +1289,6 @@ dependencies = [
 [[package]]
 name = "sifli-hal"
 version = "0.1.1"
-source = "git+https://github.com/OpenSiFli/sifli-rs?rev=aa4c19c5cf014f07d275ebaf233480807cdb8685#aa4c19c5cf014f07d275ebaf233480807cdb8685"
 dependencies = [
  "bitfield-struct",
  "cfg-if",
@@ -1342,7 +1341,6 @@ dependencies = [
 [[package]]
 name = "sifli-radio"
 version = "0.1.0"
-source = "git+https://github.com/OpenSiFli/sifli-rs?rev=aa4c19c5cf014f07d275ebaf233480807cdb8685#aa4c19c5cf014f07d275ebaf233480807cdb8685"
 dependencies = [
  "bt-hci",
  "cortex-m",
