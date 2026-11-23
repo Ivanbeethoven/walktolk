@@ -51,8 +51,8 @@ profile runs the sessions and speech recognizer. The plugin reads its pairing
 key from `~/.dsh/deck-bridge.key`. The Android app receives that key, the relay
 cookie, and the public TLS certificate through `android-otg/pair-phone.ps1`.
 On the phone, connect the deck by USB, grant access, and select **连接桌面 DSH**.
-For Bluetooth, install the Rev A DSH BLE firmware and select **通过蓝牙连接 deck**
-in version 1.3 of the Android app. Confirm pairing on first use.
+For Bluetooth, use firmware with the Deck Control GATT service and select
+**通过蓝牙连接 deck** in version 1.3 of the Android app. Confirm pairing on first use.
 **查看 DSH 会话** opens the same desktop sessions while forwarding continues.
 
 On the deck, use the left and right buttons to switch between groups of current and saved sessions. Turn the wheel to select a session and press ENTER to read its latest reply. Press ENTER again to see its status and recent activity when there is no pending card. Browsing a saved session leaves its agent stopped.
@@ -120,9 +120,11 @@ rather than assuming the newest build. Everything below was measured on a
   so `maxChoices` is 2 below 0.10.0.
 - `kind`, `proj` and `since` are already understood by 0.7.0.
 
-For the Android Bluetooth bridge, use the [custom Rev A firmware](../firmware/),
-based on upstream v0.14.0. Its [protocol documentation](../firmware/docs/deck-protocol.md)
-describes the encrypted channel-5 GATT service.
+The Android app discovers the encrypted Deck Control service by UUID. The
+[custom Rev A firmware](../firmware/) provides it today. An official firmware
+release containing the same service can use the same Android app and plugin.
+Stock device firmware v0.14.0 supports the USB-OTG path.
+[Protocol](../firmware/docs/deck-protocol.md) · [Upstream PR #29](https://github.com/conol-ai/openwalkietalkie/pull/29)
 
 ### 0.14.0, measured later
 

@@ -24,3 +24,5 @@ git clone --recurse-submodules https://github.com/Ivanbeethoven/walktolk.git
 ## 当前运行方式
 
 deck 通过蓝牙连接手机，也可以用 USB 数据线直连手机。手机使用自己的网络访问中继，桌面插件以 `transport: remote` 接收报文。会话、工具执行和语音转录都由桌面的 DSH 提供，所以使用这套配置时电脑需要开机。直接把 deck 插在 Windows 电脑上时，插件也可以用 `transport: hid` 连接设备。
+
+**固件升级。** 手机通过 USB-OTG 已在官方设备固件 `0.14.0` 上验证。手机通过蓝牙还需要 Deck Control GATT 服务，安卓应用配对后会按服务 UUID 自动识别。当前使用的是本仓库的 Rev A 固件。上游发布包含该服务的设备固件后，即可用官方版本继续连接同一个手机应用和桌面插件。[上游适配 PR #29](https://github.com/conol-ai/openwalkietalkie/pull/29)
