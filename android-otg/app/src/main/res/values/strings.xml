@@ -1,0 +1,13 @@
+<resources>
+    <string name="sessions">查看 DSH 会话</string>
+    <string name="back_to_deck">返回 deck 连接状态</string>
+    <string name="pair_first">请先完成桌面配对。</string>
+    <string name="checking_dsh">正在检查桌面 DSH</string>
+    <string name="connect">连接桌面 DSH</string>
+    <string name="disconnect">断开 DSH</string>
+    <string name="last_test">上次测试记录</string>
+    <string name="waiting_device">等待连接 deck</string>
+    <string name="no_device">未发现 deck</string>
+    <string name="waiting_permission">等待 USB 授权</string>
+    <string name="waiting_hello">正在等待 deck 的 hello</string>
+</resources>

@@ -1,0 +1,10 @@
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="otg-hello.log" />
+        <exclude domain="external" path="otg-hello.log" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="otg-hello.log" />
+        <exclude domain="external" path="otg-hello.log" />
+    </device-transfer>
+</data-extraction-rules>
