@@ -291,6 +291,16 @@ struct Server {
     battery: BatteryService,
     hid: HidService,
     audio: AudioService,
+    deck_control: DeckControlService,
+}
+
+/// Channel 5 as a byte stream for hosts using public GATT APIs.
+#[gatt_service(uuid = "f65fc100-b23e-4c52-94f2-bc437242d398")]
+struct DeckControlService {
+    #[characteristic(uuid = "f65fc101-b23e-4c52-94f2-bc437242d398", write, value = heapless::Vec::new(), permissions(write = encrypted))]
+    rx: heapless::Vec<u8, 61>,
+    #[characteristic(uuid = "f65fc102-b23e-4c52-94f2-bc437242d398", notify, value = heapless::Vec::new(), permissions(cccd = encrypted))]
+    tx: heapless::Vec<u8, 61>,
 }
 
 #[gatt_service(uuid = "180a")]
@@ -497,6 +507,7 @@ pub async fn task(p: RadioPeripherals, address: [u8; 6]) {
                                 u16::from(record.hid_notify).into(),
                             ),
                             (server.audio.mic.cccd_handle.unwrap(), 0u16.into()),
+                            (server.deck_control.tx.cccd_handle.unwrap(), 0u16.into()),
                         ]),
                     );
                 }
@@ -603,12 +614,25 @@ async fn gatt_task(
                     cccd_written = Some(e.handle()) == server.hid.input.cccd_handle
                         || Some(e.handle()) == server.battery.level.cccd_handle;
                     mic_cccd = Some(e.handle()) == server.audio.mic.cccd_handle;
-                    if e.handle() == server.hid.output.handle && e.data().len() <= frame.len() {
+                    let phone_control = subscribed(server, conn, server.deck_control.tx.cccd_handle);
+                    if e.handle() == server.deck_control.rx.handle
+                        && phone_control
+                        && !e.data().is_empty()
+                        && e.data().len() <= wire::PAYLOAD_MAX
+                    {
+                        frame[0] = proto::CHANNEL;
+                        frame[1] = e.data().len() as u8;
+                        len = 2 + e.data().len();
+                        frame[2..len].copy_from_slice(e.data());
+                    } else if e.handle() == server.hid.output.handle
+                        && e.data().len() <= frame.len()
+                        && !(phone_control && is_deck(e.data()))
+                    {
                         len = e.data().len();
                         frame[..len].copy_from_slice(e.data());
-                        if burst.report(Instant::now()) {
-                            crate::audio::voice::ACTIVITY.signal(());
-                        }
+                    }
+                    if len != 0 && burst.report(Instant::now()) {
+                        crate::audio::voice::ACTIVITY.signal(());
                     }
                     // Speaker frames are queued before the reply goes out:
                     // the write is decided whatever the reply's fate.
@@ -1198,6 +1222,27 @@ impl ReportSink for BleSink<'_, '_, '_> {
     /// The BLE report characteristic carries the 63-byte body; the report id
     /// lives in its Report Reference descriptor.
     async fn send(&mut self, report: &[u8; wire::REPORT_LEN]) -> Result<(), LinkError> {
+        if report[1] == proto::CHANNEL
+            && subscribed(self.server, self.conn, self.server.deck_control.tx.cccd_handle)
+        {
+            let limit = usize::from(self.conn.raw().att_mtu().saturating_sub(3))
+                .clamp(1, wire::PAYLOAD_MAX);
+            for part in report[3..3 + usize::from(report[2])].chunks(limit) {
+                let value = heapless::Vec::from_slice(part).unwrap();
+                match with_timeout(
+                    Duration::from_millis(500),
+                    self.server.deck_control.tx.notify(self.conn, &value),
+                ).await {
+                    Ok(result) => result.map_err(LinkError::Ble)?,
+                    Err(_) => {
+                        self.conn.raw().disconnect();
+                        return Err(LinkError::Timeout);
+                    }
+                };
+                Timer::after_millis(4).await;
+            }
+            return Ok(());
+        }
         let mut body = [0; 63];
         body.copy_from_slice(&report[1..]);
         match with_timeout(

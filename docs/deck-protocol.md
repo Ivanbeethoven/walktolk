@@ -36,6 +36,15 @@ voice over USB).
 output / input report:  [6, 5, len, payload[0..len], zero padding]   len <= 61
 ```
 
+The DSH BLE firmware for Rev A also exposes channel 5 over the encrypted
+GATT service `f65fc100-b23e-4c52-94f2-bc437242d398`. Subscribe to TX
+(`f65fc102-b23e-4c52-94f2-bc437242d398`) before writing to RX
+(`f65fc101-b23e-4c52-94f2-bc437242d398`) with a write request. Each value
+carries up to `min(61, ATT_MTU - 3)` bytes of the newline-delimited control
+stream. Reassemble bytes through the newline before decoding UTF-8. While TX
+is subscribed, BLE channel-5 replies and events use TX. Audio uses the
+microphone characteristic of the existing audio service.
+
 A message is one line: a compact JSON object in raw UTF-8 terminated by a raw
 LF (`0x0A`). `\uXXXX` escapes (including surrogate pairs) are accepted but not
 needed; raw UTF-8 is shorter. A line is at most **1024 bytes including the
