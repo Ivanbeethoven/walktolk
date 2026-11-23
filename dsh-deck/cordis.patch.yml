@@ -1,0 +1,18 @@
+# dsh-deck's own patch layer, for installing the plugin as a bundle:
+#   dsh plugin --profile desktop add <path-to-this-package>
+#
+# Installing it straight into a profile's cordis.patch.yml instead needs only
+# the `insert` row below.
+- insert:
+    - id: deck
+      name: dsh-deck
+      config:
+        # 'hid' talks to the deck over USB-C; 'sim' runs against an in-memory
+        # fake deck, which is what the tests use.
+        transport: hid
+        # The deck advertises its roster capacity during the handshake.
+        agentLimit: 255
+        # Explicit device path, for a machine with more than one deck attached.
+        devicePath: ''
+        # Log link transitions to the harness log.
+        log: false
